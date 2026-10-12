@@ -294,11 +294,68 @@ without receipts, and an optional "no donation in N days" reminder.
    tests against Paperless and MinIO containers.
 7. **Metrics, alerts, dashboard, docs.** Rules checked with `promtool`, Grafana
    dashboard, README, example manifests.
-8. **Later.** Lockfile parsers for ecosystems without SBOM support, GitLab,
+8. **Runtime usage (roadmap).** Count what you actually use from your
+   reverse proxy's metrics, and map it to projects. See section 11.
+9. **Later.** Lockfile parsers for ecosystems without SBOM support, GitLab,
    CSV/tax-year export, a Paperless matcher for late
    receipts.
 
-## 11. Open points
+## 11. Runtime usage signal (roadmap)
+
+Scanning finds what you *depend on*. It cannot tell what you actually *use*,
+and it never sees the applications you only run (Paperless-ngx, Grafana,
+Jellyfin, …), because they are not dependencies of your own code. A second,
+runtime signal fills that gap: which of your self-hosted services get used,
+and how much.
+
+**Source of the signal: Traefik's own metrics first, a plugin only if needed.**
+Traefik already exports per-router and per-service request counters (Prometheus
+`traefik_service_requests_total` and friends) and can write JSON access logs.
+Donarium can read them without anything running inside the proxy:
+
+- **Prometheus query (default).** Donarium queries an existing Prometheus
+  (`--prometheus-url`) once a day for the previous day's request counts per
+  Traefik service, split by status class. Any proxy that exports similar
+  metrics (Caddy, ingress-nginx) works the same way.
+- **Access logs (alternative)**, for setups without Prometheus.
+- **A Traefik plugin** would only add value if the metrics turn out to be too
+  coarse (for example distinct visitors or paths). It is also the costlier
+  option: plugins are Go code run by Traefik's Yaegi interpreter, which limits
+  the standard library and dependencies, they are installed from a public
+  GitHub repository through the Traefik plugin catalog, they run inside every
+  request path of the proxy, and they would need their own release and
+  maintenance. Not planned unless the metrics approach proves insufficient.
+
+**Mapping a service to a project is the real work**, not the counting:
+
+- An admin maps a Traefik service (or hostname) to a project in the UI.
+  Suggestions come from matching the service name against known projects.
+- Container images in manifests of a scanned source (for example a homelab
+  GitOps repository) resolve to an upstream repository through the image's
+  `org.opencontainers.image.source` label. This reuses the scanner, needs no
+  Kubernetes access, and gives the mapping for free where it works.
+
+**From counts to a score.** Raw request counts say little (a chatty API versus a
+tool you open twice a week). The signal is **active days**: days in the last 90
+with enough successful requests, after excluding health checks, static assets
+and obvious scanner traffic (4xx floods). The runtime score is added to the
+static usage score with its own configurable factor, and the detail view shows
+both ("declared in 3 repositories, used on 61 of the last 90 days").
+
+**Privacy.** Only per-service daily aggregates are stored. No URLs, client IPs
+or user identifiers leave the proxy's metrics.
+
+Data model sketch, added when this is built:
+
+```sql
+service_mapping(service_key, project_id, origin /* manual | image | suggested */)
+runtime_usage(service_key, day, requests_ok, requests_error)
+```
+
+It does not block any earlier milestone: scanning, ranking and donations work
+without it.
+
+## 12. Open points
 
 - CRDs and GitOps for sources/overrides are deferred. If wanted later, they
   write into the same tables, so nothing built before then changes.
