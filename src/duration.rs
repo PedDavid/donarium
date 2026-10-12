@@ -1,15 +1,13 @@
-//! Durations as written in `ApiKey` specs and config: `<n><unit>` with unit
+//! Durations as written in config: `<n><unit>` with unit
 //! one of `s`, `m`, `h`, `d`, `w` (e.g. `90d`, `2w`).
 
 use jiff::SignedDuration;
 
 /// Most digits a duration may have. Five keeps every value (up to 99999
-/// weeks) far from overflowing a timestamp, and the CRD schema enforces the
-/// same limit through [`PATTERN`], so the API server cannot store a value
-/// the controller would reject.
+/// weeks) far from overflowing a timestamp.
 pub const MAX_DIGITS: usize = 5;
 
-/// [`parse`]'s grammar as a regex, for the CRD schema.
+/// [`parse`]'s grammar as a regex, for validating input in forms.
 pub const PATTERN: &str = r"^[0-9]{1,5}(s|m|h|d|w)$";
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

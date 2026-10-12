@@ -1,6 +1,6 @@
-//! Read access to projects. The real implementation (CRDs plus the scan
-//! results in the database) arrives with the next milestones; the in-memory
-//! one backs `--demo` and the tests.
+//! Read access to projects. The real implementation, backed by the database,
+//! arrives with the next milestone; the in-memory one backs `--demo` and the
+//! tests.
 
 use crate::model::Project;
 

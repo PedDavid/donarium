@@ -24,8 +24,7 @@ async fn main() -> anyhow::Result<()> {
             jiff::Timestamp::now(),
         )))
     } else {
-        // Storage (Project/Source resources and the database) arrives with the
-        // next milestone.
+        // The database arrives with the next milestone.
         warn!("no storage configured yet: serving an empty project list");
         Arc::new(MemoryRepository::default())
     };
