@@ -1,0 +1,11 @@
+{% if !rows.is_empty() %}
+<div role="group" aria-labelledby="command-projects">
+  <span role="presentation" class="command-heading" id="command-projects">Projects</span>
+  {% for row in rows %}
+  <a role="option" id="command-option-{{ loop.index }}" href="/projects/{{ row.name }}" aria-selected="{% if loop.first %}true{% else %}false{% endif %}"{% if loop.first %} class="active"{% endif %}>
+    <span class="truncate">{{ row.name }}</span>
+    <span class="ms-auto" data-shortcut>{{ row.last_donation }}</span>
+  </a>
+  {% endfor %}
+</div>
+{% endif %}

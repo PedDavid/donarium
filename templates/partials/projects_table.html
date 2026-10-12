@@ -1,0 +1,46 @@
+{% if rows.is_empty() %}
+<div class="empty rounded-lg border border-dashed">
+  <header>
+    <figure>{% include "icons/database.svg" %}</figure>
+    {% if total == 0 %}
+    <h3>No projects yet</h3>
+    <p>Projects appear here once your repositories have been scanned.</p>
+    {% else %}
+    <h3>No matching projects</h3>
+    <p>Try a different filter.</p>
+    {% endif %}
+  </header>
+</div>
+{% else %}
+<div class="table-container rounded-lg border">
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Project</th>
+        <th>Usage</th>
+        <th>Last donation</th>
+        <th class="hidden sm:table-cell">Funding</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td>
+          <a href="/projects/{{ row.name }}" class="font-medium hover:underline">{{ row.name }}</a>
+          <div class="text-xs text-muted-foreground">{{ row.repo }}</div>
+        </td>
+        <td>{{ row.usage }}</td>
+        <td class="text-muted-foreground" title="{{ row.last_donation_date }}">{{ row.last_donation }}</td>
+        <td class="hidden sm:table-cell">
+          {% if row.funding.is_empty() %}
+          <span class="text-muted-foreground">none found</span>
+          {% else %}
+          {% for f in row.funding %}<span class="badge" data-variant="secondary">{{ f }}</span> {% endfor %}
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}

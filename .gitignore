@@ -1,0 +1,6 @@
+/target
+/node_modules
+
+# Visual test failures
+/tests/screenshots/*-actual.png
+/tests/screenshots/*-diff.png

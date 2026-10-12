@@ -1,0 +1,70 @@
+image:
+  repository: ghcr.io/peddavid/donarium
+  tag: ""  # defaults to the chart appVersion
+  pullPolicy: IfNotPresent
+
+# Public URL of the UI (OIDC redirect, Origin checks, links in alerts).
+publicUrl: https://donations.example.com
+
+oidc:
+  issuer: ""            # e.g. https://auth.example.com/application/o/donarium/
+  clientId: donarium
+  # Secret holding the client secret (leave empty for public clients).
+  clientSecret:
+    existingSecret: ""
+    key: client-secret
+  scopes: "profile email groups"
+  adminClaim: groups
+  adminValue: donarium-admins
+  sessionTtl: 8h
+  # Require a login no older than this to record a donation, e.g. 15m. Empty = off.
+  stepUpMaxAge: ""
+
+# Key encrypting session cookies. Generated once and kept across upgrades
+# unless an existing Secret (with key `cookie-key`, >= 64 bytes) is given.
+cookieKey:
+  existingSecret: ""
+
+# Development only: every visitor is an admin.
+insecureDevAuth: false
+
+service:
+  # Applies to the UI only. Metrics and health checks always get a separate
+  # ClusterIP Service (<fullname>-metrics).
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: donations.example.com
+  tls: []
+
+serviceMonitor:
+  enabled: false
+  interval: 60s
+  labels: {}
+
+# Numeric IDs are required: with runAsNonRoot the kubelet cannot verify a
+# non-numeric image USER. 65532 is distroless's `nonroot`.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+logJson: true
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

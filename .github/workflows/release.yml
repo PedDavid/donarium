@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # The chart's default image tag is its appVersion, so that tag must
+      # exist as soon as the chart is on main: publish it the first time a
+      # new appVersion is seen (a version bump), never overwrite it from
+      # main afterwards, and require release tags to match it.
+      - id: version
+        run: |
+          app=$(yq '.appVersion' deploy/helm/donarium/Chart.yaml)
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "app=$app" >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          if [[ $GITHUB_REF == refs/tags/v* && ${GITHUB_REF#refs/tags/v} != "$app" ]]; then
+            echo "::error::tag ${GITHUB_REF#refs/tags/} does not match the chart appVersion $app"
+            exit 1
+          fi
+          if docker buildx imagetools inspect "$image:$app" >/dev/null 2>&1; then
+            echo "first=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "first=true" >> "$GITHUB_OUTPUT"
+          fi
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+            type=raw,value=main,enable={{is_default_branch}}
+            type=raw,value=${{ steps.version.outputs.app }},enable=${{ steps.version.outputs.first == 'true' && github.ref_type == 'branch' }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: The chart's default image exists
+        run: docker buildx imagetools inspect "${{ steps.version.outputs.image }}:${{ steps.version.outputs.app }}"
+
+  # Publishes the chart to oci://ghcr.io/<owner>/charts/donarium. Like the
+  # image's appVersion tag, each chart version is pushed once, the first time
+  # it is seen, and never overwritten: chart changes need a version bump.
+  chart:
+    needs: image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: azure/setup-helm@v4
+      - run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - run: |
+          version=$(yq '.version' deploy/helm/donarium/Chart.yaml)
+          repo="oci://ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts"
+          if helm show chart "$repo/donarium" --version "$version" >/dev/null 2>&1; then
+            echo "donarium $version is already published"
+            if ! git diff --quiet HEAD^ HEAD -- deploy/helm/donarium; then
+              echo "::warning::deploy/helm/donarium changed but its version is still $version, so the change was not published"
+            fi
+            exit 0
+          fi
+          helm package deploy/helm/donarium -d dist
+          helm push "dist/donarium-$version.tgz" "$repo"

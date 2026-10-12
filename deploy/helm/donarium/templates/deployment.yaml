@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "donarium.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "donarium.labels" . | nindent 4 }}
+spec:
+  # One replica: SQLite on a ReadWriteOnce volume, and one scheduler for scans.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "donarium.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "donarium.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "donarium.fullname" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: donarium
+          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: DONARIUM_PUBLIC_URL
+              value: {{ required "publicUrl is required" .Values.publicUrl | quote }}
+            - name: DONARIUM_COOKIE_KEY_FILE
+              value: /etc/donarium/cookie/cookie-key
+            {{- if .Values.insecureDevAuth }}
+            - name: DONARIUM_INSECURE_DEV_AUTH
+              value: "true"
+            {{- else }}
+            - name: DONARIUM_OIDC_ISSUER
+              value: {{ required "oidc.issuer is required (or set insecureDevAuth for development)" .Values.oidc.issuer | quote }}
+            - name: DONARIUM_OIDC_CLIENT_ID
+              value: {{ .Values.oidc.clientId | quote }}
+            {{- if .Values.oidc.clientSecret.existingSecret }}
+            - name: DONARIUM_OIDC_CLIENT_SECRET_FILE
+              value: /etc/donarium/oidc/{{ .Values.oidc.clientSecret.key }}
+            {{- end }}
+            - name: DONARIUM_OIDC_SCOPES
+              value: {{ .Values.oidc.scopes | quote }}
+            - name: DONARIUM_ADMIN_CLAIM
+              value: {{ .Values.oidc.adminClaim | quote }}
+            - name: DONARIUM_ADMIN_VALUE
+              value: {{ .Values.oidc.adminValue | quote }}
+            - name: DONARIUM_SESSION_TTL
+              value: {{ .Values.oidc.sessionTtl | quote }}
+            {{- with .Values.oidc.stepUpMaxAge }}
+            - name: DONARIUM_STEP_UP_MAX_AGE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.logJson }}
+            - name: DONARIUM_LOG_JSON
+              value: "true"
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: metrics
+              containerPort: 9090
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: cookie-key
+              mountPath: /etc/donarium/cookie
+              readOnly: true
+            {{- if and (not .Values.insecureDevAuth) .Values.oidc.clientSecret.existingSecret }}
+            - name: oidc
+              mountPath: /etc/donarium/oidc
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: cookie-key
+          secret:
+            secretName: {{ include "donarium.cookieSecretName" . }}
+        {{- if and (not .Values.insecureDevAuth) .Values.oidc.clientSecret.existingSecret }}
+        - name: oidc
+          secret:
+            secretName: {{ .Values.oidc.clientSecret.existingSecret }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

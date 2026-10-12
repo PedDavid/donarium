@@ -1,0 +1,19 @@
+# /metrics, /healthz and /readyz have no authentication and expose key
+# names, owners and deadlines, so they get their own ClusterIP Service that
+# service.type never changes.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "donarium.fullname" . }}-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "donarium.labels" . | nindent 4 }}
+    app.kubernetes.io/component: metrics
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "donarium.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: metrics

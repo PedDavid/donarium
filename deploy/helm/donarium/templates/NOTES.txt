@@ -1,0 +1,7 @@
+donarium is installed.
+
+UI: {{ .Values.publicUrl }}
+{{- if .Values.insecureDevAuth }}
+
+WARNING: insecureDevAuth is on: every visitor is an admin.
+{{- end }}

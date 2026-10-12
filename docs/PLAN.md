@@ -7,7 +7,7 @@ donation to its receipt. Receipts are referenced where they already exist
 (Paperless-ngx) or stored in S3. Donarium never moves money: you donate on the
 project's own page, then record it.
 
-It is built like [clavium](https://github.com/PedDavid/clavium): one Rust
+It is built like [donarium](https://github.com/PedDavid/donarium): one Rust
 binary, axum + askama + htmx + Basecoat UI, OIDC login, Prometheus metrics, a
 Helm chart and a CRD group under `prdv.cloud`.
 
@@ -17,11 +17,11 @@ Helm chart and a CRD group under `prdv.cloud`.
 |---|---|
 | Scope | Tracking, ranking and receipts. No payments are made by the app |
 | Platform | Kubernetes only. CRD group `donarium.prdv.cloud` |
-| Inventory (git) | `Project` and `Source` CRs (see section 3), applied by GitOps like clavium's `ApiKey` |
+| Inventory (git) | `Project` and `Source` CRs (see section 3), applied by GitOps like donarium's `ApiKey` |
 | Donations | SQLite on a PVC by default, Postgres optional (`--database-url`). Append-only, because the app creates them and they don't belong in git or etcd |
 | Usage data | Scanned from your own repos' dependencies, stored in the database, recomputed on a schedule |
 | Receipts | Pluggable `ReceiptStore`: **reference** a Paperless-ngx document (default flow), or **upload** to an S3-compatible bucket |
-| Auth | OIDC, as in clavium. Everyone who logs in can view; admins (group claim) can record donations and edit weights |
+| Auth | OIDC, as in donarium. Everyone who logs in can view; admins (group claim) can record donations and edit weights |
 | Language / UI | Rust; askama + Tailwind + Basecoat + htmx; single binary |
 | Alerting | Metrics only (reminders such as "no donation in 90 days"). No notifier of its own |
 
@@ -43,7 +43,7 @@ Helm chart and a CRD group under `prdv.cloud`.
 - **Why hybrid:** what you *watch* (which repos to scan, which projects to
   pin or ignore) is declarative and reviewable, so it lives in git. What you
   *did* (donations, scan results) is event data the app writes, so it lives in
-  the database. Clavium's "no database" rule doesn't fit append-only records
+  the database. Donarium's "no database" rule doesn't fit append-only records
   with attachments.
 - Backups: the Helm chart documents a `VolumeSnapshot` / `litestream` option.
   Donations are the one thing here that can't be rebuilt, because scan results
@@ -75,7 +75,7 @@ spec:
 
 Projects are **discovered** by scans and exist in the database without a CR.
 A `Project` CR only adds overrides. Status (last scan, validation) goes in
-`.status` as in clavium, with the `status` subresource and a generated CRD.
+`.status` as in donarium, with the `status` subresource and a generated CRD.
 
 ## 4. Usage scanning
 
@@ -143,7 +143,7 @@ The **detail view** shows the full picture behind the number:
 Recording flow (admin only):
 
 1. From a project's page, **Donate** opens its funding link (same pattern as
-   clavium's on-demand "Create" link: the click is recorded, then it redirects).
+   donarium's on-demand "Create" link: the click is recorded, then it redirects).
 2. **Record donation**: project, platform, amount, currency, date, recurring or
    one-off, optional note, and the receipt (section 7).
 3. Rows are append-only. Corrections are a new `void` row that references the
@@ -247,7 +247,7 @@ without receipts, and an optional "no donation in N days" reminder.
 
 - OIDC with PKCE, encrypted cookie sessions, CSRF and same-origin checks, strict
   CSP and `no-store` responses, optional step-up for recording: all copied
-  from clavium's `web::auth`.
+  from donarium's `web::auth`.
 - Secrets (GitHub token, Paperless token, S3 credentials) come from mounted
   files, held in `SecretString`, and never logged.
 - Provider and Paperless/S3 hosts are fixed by config, never taken from a CR,
@@ -256,7 +256,7 @@ without receipts, and an optional "no donation in N days" reminder.
 
 ## 10. Milestones
 
-1. **Skeleton.** Copy clavium's scaffolding: config, CLI, tracing, OIDC/auth,
+1. **Skeleton.** Copy donarium's scaffolding: config, CLI, tracing, OIDC/auth,
    axum + askama + Basecoat shell, `--demo` mode, Helm chart, CI (fmt, clippy,
    tests, CRD up-to-date check, chart release), Dockerfile.
 2. **Projects and sources.** `Source`/`Project` CRDs with a generated CRD and
@@ -264,7 +264,7 @@ without receipts, and an optional "no donation in N days" reminder.
 3. **Scanner.** GitHub dependency-graph/SBOM first, then deps.dev resolution,
    aggregation, and the usage table. `wiremock` tests with recorded fixtures.
 4. **Ranking and views.** List by `priority`, detail view with usage, timeline,
-   fair share and funding; snapshot and screenshot tests as in clavium.
+   fair share and funding; snapshot and screenshot tests as in donarium.
 5. **Donations.** Record, void, totals, recurring entries, `FUNDING.yml`
    discovery, currency conversion (Frankfurter client, rate cache, manual
    override, retry task).
@@ -281,6 +281,6 @@ without receipts, and an optional "no donation in N days" reminder.
 
 - Weights for transitive dependencies (0.25 is a guess) need tuning against
   real data once milestone 3 runs on your repos.
-- Whether to bring in code from clavium as a shared crate (auth, metrics
+- Whether to bring in code from donarium as a shared crate (auth, metrics
   helpers, layout) or copy it. Copying is faster now; a shared crate pays off if
   a third app appears.

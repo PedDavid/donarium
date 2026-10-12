@@ -1,0 +1,49 @@
+/* State colours and optional accent palettes (shadcn-style tokens). */
+:root {
+  --state-ok: oklch(0.63 0.17 149);
+  --state-warning: oklch(0.77 0.16 70);
+  --state-critical: oklch(0.65 0.21 35);
+  --state-expired: oklch(0.58 0.22 27);
+  --state-unknown: oklch(0.6 0.02 260);
+  --state-on-demand: oklch(0.62 0.13 250);
+}
+
+/* Accent palettes. Neutral is Basecoat's default. Each primary keeps at least
+   4.5:1 contrast with its foreground in light and dark mode (WCAG AA for
+   normal text); tests/contrast.rs checks every pair. */
+html[data-palette='blue'] {
+  --primary: oklch(0.546 0.245 262.881);
+  --primary-foreground: oklch(0.97 0.014 254.604);
+  --ring: oklch(0.623 0.214 259.815);
+}
+html[data-palette='blue'].dark {
+  --primary: oklch(0.546 0.245 262.881);
+  --ring: oklch(0.488 0.243 264.376);
+}
+html[data-palette='green'] {
+  --primary: oklch(0.532 0.157 131.589);
+  --primary-foreground: oklch(0.986 0.031 120.757);
+  --ring: oklch(0.648 0.2 131.684);
+}
+html[data-palette='green'].dark {
+  --primary: oklch(0.532 0.157 131.589);
+  --ring: oklch(0.532 0.157 131.589);
+}
+html[data-palette='orange'] {
+  --primary: oklch(0.553 0.195 38.402);
+  --primary-foreground: oklch(0.98 0.016 73.684);
+  --ring: oklch(0.646 0.222 41.116);
+}
+html[data-palette='orange'].dark {
+  --primary: oklch(0.553 0.195 38.402);
+  --ring: oklch(0.553 0.195 38.402);
+}
+html[data-palette='violet'] {
+  --primary: oklch(0.541 0.281 293.009);
+  --primary-foreground: oklch(0.969 0.016 293.756);
+  --ring: oklch(0.541 0.281 293.009);
+}
+html[data-palette='violet'].dark {
+  --primary: oklch(0.541 0.281 293.009);
+  --ring: oklch(0.491 0.27 292.581);
+}

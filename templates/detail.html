@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="flex flex-col gap-6">
+  <a href="/" class="inline-flex items-center gap-1 text-sm text-muted-foreground hover:underline [&>svg]:size-4">{% include "icons/chevron-left.svg" %} All projects</a>
+  <div>
+    <h1 class="text-2xl font-semibold tracking-tight">{{ project.name }}</h1>
+    <p class="text-muted-foreground text-sm">{{ project.repo }}</p>
+  </div>
+  <div class="card">
+    <section>
+      <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 text-sm">
+        <dt class="text-muted-foreground">Usage score</dt><dd>{{ project.usage }}</dd>
+        <dt class="text-muted-foreground">Last donation</dt><dd title="{{ project.last_donation_date }}">{{ project.last_donation }}</dd>
+        <dt class="text-muted-foreground">Funding</dt>
+        <dd>{% if project.funding.is_empty() %}none found{% else %}{% for f in project.funding %}<span class="badge" data-variant="secondary">{{ f }}</span> {% endfor %}{% endif %}</dd>
+      </dl>
+    </section>
+  </div>
+</div>
+{% endblock %}

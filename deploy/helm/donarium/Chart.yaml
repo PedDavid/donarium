@@ -1,0 +1,9 @@
+apiVersion: v2
+name: donarium
+description: Tracks which open-source projects you depend on, ranks them for donations and keeps the receipts
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/PedDavid/donarium
+sources:
+  - https://github.com/PedDavid/donarium

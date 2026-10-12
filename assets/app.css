@@ -1,0 +1,63 @@
+/* Tailwind entry point. Build with `make css` (standalone Tailwind CLI). */
+@import "tailwindcss" source(none);
+@source "../templates";
+@source "./js";
+@import "./vendor/basecoat/basecoat-vega.css";
+@import "./themes.css";
+
+@layer components {
+  /* The command palette is an ARIA combobox with a listbox of options.
+     Basecoat styles its command component through menu roles; these rules
+     give the listbox and options the same look. */
+  .command [role='listbox'] {
+    @apply max-h-72 scroll-py-1 overflow-x-hidden overflow-y-auto outline-hidden;
+    scrollbar-width: none;
+  }
+  .command [role='listbox']:not(:has([role='option']))::before {
+    @apply flex items-center justify-center truncate py-6 text-center text-sm content-[attr(data-empty)];
+  }
+  /* Basecoat hides groups without menuitems; ours hold options. */
+  #command-results > [role='group'] {
+    @apply block;
+  }
+  .command .command-heading {
+    @apply flex text-muted-foreground px-2 py-1.5 text-xs font-medium;
+  }
+  .command [role='option'] {
+    @apply relative flex w-full cursor-default items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-hidden select-none in-[.command-dialog]:rounded-lg [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4;
+  }
+  .command [role='option'].active {
+    @apply bg-muted text-foreground [&_svg]:text-foreground;
+  }
+  .command [role='option'].active [data-shortcut] {
+    @apply text-foreground;
+  }
+
+  .kv {
+    @apply grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm;
+  }
+  .kv dt {
+    @apply text-muted-foreground;
+  }
+
+  /* Deadline state colours, shared by badges, chips and dots. */
+  [data-state='ok'] { --state: var(--state-ok); }
+  [data-state='warning'] { --state: var(--state-warning); }
+  [data-state='critical'] { --state: var(--state-critical); }
+  [data-state='expired'] { --state: var(--state-expired); }
+  [data-state='unknown'] { --state: var(--state-unknown); }
+  [data-state='on-demand'] { --state: var(--state-on-demand); }
+
+  .state-dot {
+    @apply inline-block size-2 shrink-0 rounded-full bg-(--state,var(--muted-foreground));
+  }
+  .badge.state-badge {
+    @apply gap-1.5 border-transparent bg-(--state)/12 text-foreground;
+  }
+  .state-chip {
+    @apply inline-flex cursor-pointer items-center gap-1.5 rounded-full border px-3 py-1 text-sm transition-colors hover:bg-muted has-focus-visible:ring-2 has-focus-visible:ring-ring;
+  }
+  .state-chip[data-active='true'] {
+    @apply border-(--state,var(--foreground)) bg-(--state,var(--foreground))/10;
+  }
+}

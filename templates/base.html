@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en" class="{% if layout.dark %}dark{% endif %}" data-palette="{{ layout.palette }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false}'>
+  <title>{{ layout.title }} · donarium</title>
+  <link rel="stylesheet" href="/assets/dist/app.css?v={{ layout.asset_version }}">
+  <link rel="icon" href="/assets/dist/favicon.svg?v={{ layout.asset_version }}" type="image/svg+xml">
+  <script src="/assets/vendor/htmx/htmx.min.js?v={{ layout.asset_version }}" defer></script>
+  <script src="/assets/js/app.js?v={{ layout.asset_version }}" defer></script>
+</head>
+<body class="min-h-screen bg-background text-foreground antialiased" hx-headers='{"X-CSRF-Token": "{{ layout.csrf }}"}'>
+  {% if layout.dev_auth %}
+  <div class="bg-destructive text-white text-center text-xs py-1">Insecure dev auth: every visitor is an admin. Do not expose this instance.</div>
+  {% endif %}
+  <header class="sticky top-0 z-40 border-b bg-background/80 backdrop-blur">
+    <div class="mx-auto flex h-14 max-w-6xl items-center gap-3 px-4">
+      <a href="/" class="flex items-center gap-2 font-semibold [&>svg]:size-5">
+        {% include "icons/database.svg" %}
+        <span>donarium</span>
+      </a>
+      <div class="ms-auto flex items-center gap-1">
+        <button type="button" class="btn hidden sm:inline-flex text-muted-foreground" data-variant="outline" data-size="sm" data-palette-open aria-label="Search projects" aria-keyshortcuts="Control+K Meta+K">
+          {% include "icons/search.svg" %}
+          <span class="pe-4">Search projects…</span>
+          <kbd class="kbd">⌘K</kbd>
+        </button>
+        <button type="button" class="btn sm:hidden" data-variant="ghost" data-size="icon" data-palette-open aria-label="Search projects">
+          {% include "icons/search.svg" %}
+        </button>
+        <button type="button" class="btn" data-variant="ghost" data-size="icon" data-theme-toggle aria-label="Toggle dark mode">
+          <span class="dark:hidden">{% include "icons/moon.svg" %}</span>
+          <span class="hidden dark:inline">{% include "icons/sun.svg" %}</span>
+        </button>
+        <button type="button" class="btn" data-variant="ghost" data-size="icon" data-palette-cycle aria-label="Change colour palette" title="Colour palette">
+          {% include "icons/palette.svg" %}
+        </button>
+        <span class="hidden md:inline-flex items-center gap-1 px-2 text-sm text-muted-foreground [&>svg]:size-4">
+          {% if layout.admin %}{% include "icons/shield-check.svg" %}{% else %}{% include "icons/user.svg" %}{% endif %}
+          {{ layout.user }}
+        </span>
+        {% if !layout.dev_auth %}
+        <form method="post" action="/auth/logout">
+          <input type="hidden" name="_csrf" value="{{ layout.csrf }}">
+          <button type="submit" class="btn" data-variant="ghost" data-size="icon" aria-label="Log out" title="Log out">
+            {% include "icons/log-out.svg" %}
+          </button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+  </header>
+  <main class="mx-auto max-w-6xl px-4 py-6">
+    {% block content %}{% endblock %}
+  </main>
+  {% block dialogs %}{% endblock %}
+  <dialog id="command-palette" class="command-dialog" aria-label="Search projects">
+    <div class="command">
+      <header>
+        {% include "icons/search.svg" %}
+        <input type="search" name="q" placeholder="Search projects…" autocomplete="off" aria-label="Search projects"
+               role="combobox" aria-autocomplete="list" aria-controls="command-results" aria-expanded="false"
+               hx-get="/search" hx-trigger="input changed delay:150ms, search, palette-open" hx-target="#command-results">
+      </header>
+      <div id="command-results" role="listbox" aria-label="Projects" data-empty="No projects found."></div>
+    </div>
+  </dialog>
+</body>
+</html>
