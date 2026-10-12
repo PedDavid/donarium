@@ -25,6 +25,17 @@ oidc:
 cookieKey:
   existingSecret: ""
 
+# The SQLite database lives on this volume: sources, projects and, later,
+# donations. Back it up; the donations cannot be rebuilt.
+persistence:
+  enabled: true
+  # Use a claim you manage instead of creating one.
+  existingClaim: ""
+  storageClass: ""
+  size: 1Gi
+  # Keep the claim (and the data) when the release is uninstalled.
+  keepOnUninstall: true
+
 # Development only: every visitor is an admin.
 insecureDevAuth: false
 
@@ -52,6 +63,8 @@ podSecurityContext:
   runAsNonRoot: true
   runAsUser: 65532
   runAsGroup: 65532
+  # Makes the volume writable for the non-root user.
+  fsGroup: 65532
   seccompProfile:
     type: RuntimeDefault
 

@@ -7,9 +7,10 @@ records each donation, and links it to its receipt (Paperless-ngx or S3).
 
 It never moves money: you donate on the project's own page, then record it.
 
-> **Status:** early. The web shell, OIDC login, metrics and Helm chart are in
-> place and run on sample data. Storage, scanning, ranking, donations and
-> receipts are next. See [docs/PLAN.md](docs/PLAN.md) for the full design and
+> **Status:** early. The web shell, OIDC login, metrics, Helm chart and the
+> SQLite database are in place, and admins can manage **sources** (the
+> repositories to scan) in the UI. Scanning, ranking, donations and receipts
+> are next. See [docs/PLAN.md](docs/PLAN.md) for the full design and
 > milestones.
 
 ## Try it
@@ -20,6 +21,16 @@ cargo run -- --demo        # http://localhost:8080, sample data, no login
 
 Demo mode keeps everything in memory and treats every visitor as an admin.
 Press <kbd>⌘K</kbd> or <kbd>/</kbd> to search.
+
+## Storage
+
+Everything is stored in one SQLite database (`--database-url`, default
+`sqlite://donarium.db`, created if missing; the Helm chart puts it on a
+volume at `/data`). Migrations in `migrations/` run on start. There are no
+CRDs and the app needs no Kubernetes API access.
+
+Back the volume up: donations (and your sources) can't be rebuilt, only scan
+results can. The chart keeps the claim when the release is uninstalled.
 
 ## Development
 

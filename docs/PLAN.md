@@ -78,13 +78,19 @@ detail page:
 
 ```sql
 source(id, provider, repo, weight, scan_method, enabled,
-       last_scan_at, last_scan_status, created_by, created_at)
-project(id, repo UNIQUE, name, first_seen_at, last_seen_at)       -- discovered
-project_override(project_id, usage_weight, ignore, notes, updated_by, updated_at)
+       last_scan_at, last_scan_status, created_by, created_at, updated_by, updated_at)
+project(id, name /* URL slug */, repo UNIQUE, first_seen_at, last_seen_at)  -- discovered
+usage(source_id, project_id, kind /* direct | transitive */)               -- scan output
 project_funding(project_id, platform, handle, url, origin /* discovered | manual */)
+project_override(project_id, usage_weight, ignore, notes, updated_by, updated_at)
 project_alias(alias_repo, project_id)
-usage(source_id, project_id, direct_count, transitive_count)       -- scan output
 ```
+
+`source`, `project`, `usage` and `project_funding` exist since milestone 2
+(`migrations/0001_init.sql`); the override and alias tables arrive with the
+project detail view. A project's usage score is the sum over enabled sources of
+the source's weight, in full for a `direct` usage and times 0.25 for a
+`transitive` one.
 
 Changes to sources and overrides are recorded with who made them and when,
 like donations. If CRDs are added later (for example a `Source` resource applied

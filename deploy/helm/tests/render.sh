@@ -21,6 +21,22 @@ sm=$(yq 'select(.kind == "ServiceMonitor")' <<<"$out")
 [[ $(yq '.spec.selector.matchLabels."app.kubernetes.io/component"' <<<"$sm") == metrics ]] \
   || fail "ServiceMonitor does not select the metrics Service"
 
+# The database volume: a claim that survives uninstall by default, the
+# caller's own claim when given, and an emptyDir only when switched off.
+out=$(render)
+pvc=$(yq 'select(.kind == "PersistentVolumeClaim")' <<<"$out")
+[[ $(yq '.metadata.annotations."helm.sh/resource-policy"' <<<"$pvc") == keep ]] \
+  || fail "the data claim is not kept on uninstall"
+claim=$(yq 'select(.kind == "Deployment") | .spec.template.spec.volumes[] | select(.name == "data") | .persistentVolumeClaim.claimName' <<<"$out")
+[[ $claim == "$(yq '.metadata.name' <<<"$pvc")" ]] || fail "the Deployment does not mount the data claim"
+out=$(render --set persistence.existingClaim=mine)
+[[ -z $(yq 'select(.kind == "PersistentVolumeClaim")' <<<"$out") ]] || fail "a claim was created despite existingClaim"
+[[ $(yq 'select(.kind == "Deployment") | .spec.template.spec.volumes[] | select(.name == "data") | .persistentVolumeClaim.claimName' <<<"$out") == mine ]] \
+  || fail "existingClaim is not mounted"
+out=$(render --set persistence.enabled=false)
+[[ $(yq 'select(.kind == "Deployment") | .spec.template.spec.volumes[] | select(.name == "data") | has("emptyDir")' <<<"$out") == true ]] \
+  || fail "persistence.enabled=false does not use an emptyDir"
+
 # The default image tag is the chart's appVersion, which the release
 # workflow publishes (see .github/workflows/release.yml).
 app=$(yq '.appVersion' "$chart/Chart.yaml")

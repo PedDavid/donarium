@@ -21,12 +21,14 @@ pub struct Layout {
     pub dark: bool,
     pub palette: String,
     pub dev_auth: bool,
+    /// Which navigation entry to highlight.
+    pub section: &'static str,
 }
 
 pub const PALETTES: [&str; 5] = ["neutral", "blue", "green", "orange", "violet"];
 
 impl Layout {
-    fn new(
+    pub(super) fn new(
         state: &AppState,
         session: &Session,
         jar: &CookieJar,
@@ -48,7 +50,13 @@ impl Layout {
                 .is_some_and(|c| c.value() == "dark"),
             palette,
             dev_auth: matches!(state.inner.auth, AuthMode::InsecureDev { .. }),
+            section: "projects",
         }
+    }
+
+    pub fn section(mut self, section: &'static str) -> Layout {
+        self.section = section;
+        self
     }
 }
 
@@ -82,12 +90,13 @@ fn is_htmx(headers: &HeaderMap, target: &str) -> bool {
             .is_some_and(|t| t == target)
 }
 
-fn rows(state: &AppState, q: &str) -> (Vec<ProjectRow>, usize) {
+async fn rows(state: &AppState, q: &str) -> Result<(Vec<ProjectRow>, usize), AppError> {
     let now = state.now();
     let all: Vec<ProjectRow> = state
         .inner
-        .repo
-        .list()
+        .store
+        .list_projects()
+        .await?
         .iter()
         .map(|p| ProjectRow::new(p, now))
         .collect();
@@ -96,7 +105,7 @@ fn rows(state: &AppState, q: &str) -> (Vec<ProjectRow>, usize) {
         .into_iter()
         .filter(|r| q.is_empty() || r.matches(q))
         .collect();
-    (rows, total)
+    Ok((rows, total))
 }
 
 pub async fn index(
@@ -106,7 +115,7 @@ pub async fn index(
     headers: HeaderMap,
     Query(filters): Query<Filters>,
 ) -> Result<Response, AppError> {
-    let (rows, total) = rows(&state, &filters.q);
+    let (rows, total) = rows(&state, &filters.q).await?;
     if is_htmx(&headers, "projects-table") {
         return Ok(Html(ProjectsTable { rows, total }.render()?).into_response());
     }
@@ -140,7 +149,7 @@ pub async fn search(
     User(_): User,
     Query(query): Query<SearchQuery>,
 ) -> Result<Response, AppError> {
-    let (mut rows, _) = rows(&state, &query.q);
+    let (mut rows, _) = rows(&state, &query.q).await?;
     rows.truncate(8);
     Ok(Html(SearchResults { rows }.render()?).into_response())
 }
@@ -160,8 +169,9 @@ pub async fn detail(
 ) -> Result<Response, AppError> {
     let project = state
         .inner
-        .repo
-        .get(&name)
+        .store
+        .get_project(&name)
+        .await?
         .ok_or_else(|| AppError::NotFound(format!("no project named {name:?}")))?;
     let row = ProjectRow::new(&project, state.now());
     Ok(Html(

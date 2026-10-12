@@ -5,3 +5,7 @@ UI: {{ .Values.publicUrl }}
 
 WARNING: insecureDevAuth is on: every visitor is an admin.
 {{- end }}
+{{- if not .Values.persistence.enabled }}
+
+WARNING: persistence is off: the database is lost whenever the pod restarts.
+{{- end }}

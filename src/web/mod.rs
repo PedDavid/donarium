@@ -3,6 +3,7 @@
 
 pub mod auth;
 mod pages;
+mod sources;
 mod views;
 
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -23,7 +24,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::config::Config;
 use crate::metrics::Metrics;
-use crate::repo::Repository;
+use crate::store::{Store, StoreError};
 use auth::AuthMode;
 
 #[derive(Clone)]
@@ -33,8 +34,7 @@ pub struct AppState {
 
 pub struct Inner {
     pub cfg: Config,
-    pub repo: Arc<dyn Repository>,
-    pub metrics: Arc<Metrics>,
+    pub store: Arc<Store>,
     pub auth: AuthMode,
     pub cookie_key: Key,
     pub asset_version: String,
@@ -43,18 +43,11 @@ pub struct Inner {
 }
 
 impl AppState {
-    pub fn new(
-        cfg: Config,
-        repo: Arc<dyn Repository>,
-        metrics: Arc<Metrics>,
-        auth: AuthMode,
-        cookie_key: Key,
-    ) -> Self {
+    pub fn new(cfg: Config, store: Arc<Store>, auth: AuthMode, cookie_key: Key) -> Self {
         AppState {
             inner: Arc::new(Inner {
                 cfg,
-                repo,
-                metrics,
+                store,
                 auth,
                 cookie_key,
                 asset_version: asset_version(),
@@ -129,6 +122,16 @@ impl IntoResponse for AppError {
         match page.render() {
             Ok(html) => (status, Html(html)).into_response(),
             Err(_) => (status, message).into_response(),
+        }
+    }
+}
+
+impl From<StoreError> for AppError {
+    fn from(e: StoreError) -> Self {
+        match e {
+            StoreError::NotFound => AppError::NotFound("not found".into()),
+            StoreError::Duplicate => AppError::BadRequest(e.to_string()),
+            other => AppError::Internal(other.to_string()),
         }
     }
 }
@@ -227,6 +230,9 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(pages::index))
         .route("/search", get(pages::search))
         .route("/projects/{name}", get(pages::detail))
+        .route("/sources", get(sources::index).post(sources::create))
+        .route("/sources/{id}", get(sources::detail).post(sources::update))
+        .route("/sources/{id}/delete", post(sources::delete))
         .route("/auth/login", get(auth::login))
         .route("/auth/callback", get(auth::callback))
         .route("/auth/logout", post(auth::logout))
@@ -244,20 +250,28 @@ pub fn router(state: AppState) -> Router {
 }
 
 /// `/metrics`, `/healthz` and `/readyz`, served on their own port.
-pub fn ops_router(repo: Arc<dyn Repository>, metrics: Arc<Metrics>) -> Router {
+pub fn ops_router(store: Arc<Store>, metrics: Arc<Metrics>) -> Router {
+    let scrape_store = store.clone();
     Router::new()
         .route(
             "/metrics",
             get(move || {
-                let metrics = metrics.clone();
+                let (store, metrics) = (scrape_store.clone(), metrics.clone());
                 async move {
-                    (
-                        [(
-                            header::CONTENT_TYPE,
-                            "application/openmetrics-text; version=1.0.0; charset=utf-8",
-                        )],
-                        metrics.encode(),
-                    )
+                    match metrics.render(&store).await {
+                        Ok(text) => (
+                            [(
+                                header::CONTENT_TYPE,
+                                "application/openmetrics-text; version=1.0.0; charset=utf-8",
+                            )],
+                            text,
+                        )
+                            .into_response(),
+                        Err(e) => {
+                            tracing::error!(error = %e, "rendering metrics failed");
+                            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                        }
+                    }
                 }
             }),
         )
@@ -265,12 +279,12 @@ pub fn ops_router(repo: Arc<dyn Repository>, metrics: Arc<Metrics>) -> Router {
         .route(
             "/readyz",
             get(move || {
-                let repo = repo.clone();
+                let store = store.clone();
                 async move {
-                    if repo.ready() {
+                    if store.ready().await {
                         (StatusCode::OK, "ready")
                     } else {
-                        (StatusCode::SERVICE_UNAVAILABLE, "cache not synced")
+                        (StatusCode::SERVICE_UNAVAILABLE, "database unavailable")
                     }
                 }
             }),

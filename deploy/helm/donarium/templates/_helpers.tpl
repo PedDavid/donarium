@@ -26,3 +26,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "donarium.cookieSecretName" -}}
 {{- default (printf "%s-cookie-key" (include "donarium.fullname" .)) .Values.cookieKey.existingSecret -}}
 {{- end -}}
+
+{{- define "donarium.claimName" -}}
+{{- default (printf "%s-data" (include "donarium.fullname" .)) .Values.persistence.existingClaim -}}
+{{- end -}}

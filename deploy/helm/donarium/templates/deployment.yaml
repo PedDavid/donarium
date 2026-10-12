@@ -39,6 +39,8 @@ spec:
                   fieldPath: metadata.name
             - name: DONARIUM_PUBLIC_URL
               value: {{ required "publicUrl is required" .Values.publicUrl | quote }}
+            - name: DONARIUM_DATABASE_URL
+              value: sqlite:///data/donarium.db
             - name: DONARIUM_COOKIE_KEY_FILE
               value: /etc/donarium/cookie/cookie-key
             {{- if .Values.insecureDevAuth }}
@@ -91,6 +93,8 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
+            - name: data
+              mountPath: /data
             - name: cookie-key
               mountPath: /etc/donarium/cookie
               readOnly: true
@@ -100,6 +104,13 @@ spec:
               readOnly: true
             {{- end }}
       volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "donarium.claimName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
         - name: cookie-key
           secret:
             secretName: {{ include "donarium.cookieSecretName" . }}

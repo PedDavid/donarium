@@ -26,8 +26,7 @@ use wiremock::matchers::path;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use donarium::config::Config;
-use donarium::metrics::Metrics;
-use donarium::repo::{MemoryRepository, Repository};
+use donarium::store::Store;
 use donarium::web::auth::{AuthMode, SESSION_COOKIE, Session};
 use donarium::web::{AppState, router};
 
@@ -103,7 +102,7 @@ impl Idp {
     }
 }
 
-fn app(idp: &Idp, key: &Key) -> Router {
+async fn app(idp: &Idp, key: &Key) -> Router {
     let cfg = Config::try_parse_from([
         "donarium",
         "--oidc-issuer",
@@ -114,10 +113,9 @@ fn app(idp: &Idp, key: &Key) -> Router {
         "15m",
     ])
     .unwrap();
-    let repo: Arc<dyn Repository> = Arc::new(MemoryRepository::new(vec![]));
-    let metrics = Metrics::new(repo.clone());
+    let store = Arc::new(Store::memory().await.unwrap());
     let auth = AuthMode::from_config(&cfg.auth, &cfg.public_url, false).unwrap();
-    router(AppState::new(cfg, repo, metrics, auth, key.clone()))
+    router(AppState::new(cfg, store, auth, key.clone()))
 }
 
 fn set_cookie(res: &axum::response::Response, name: &str) -> String {
@@ -137,7 +135,7 @@ async fn login(
     reauth: bool,
     auth_time: Option<chrono::DateTime<Utc>>,
 ) -> axum::response::Response {
-    let app = app(idp, key);
+    let app = app(idp, key).await;
     let uri = if reauth {
         "/auth/login?reauth=true&next=/projects/x"
     } else {

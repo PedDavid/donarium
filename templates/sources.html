@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="flex flex-col gap-6">
+  {% if !notice.is_empty() %}
+  <div class="alert" role="status">
+    {% include "icons/circle-check.svg" %}
+    <h2>{{ notice }}</h2>
+  </div>
+  {% endif %}
+
+  <div>
+    <h1 class="text-2xl font-semibold tracking-tight">Sources</h1>
+    <p class="text-muted-foreground text-sm">The repositories that are scanned to find out which projects you depend on. The weight says how much a repository counts: a production service might be 1, a toy project 0.2.</p>
+  </div>
+
+  {% if rows.is_empty() %}
+  <div class="empty rounded-lg border border-dashed">
+    <header>
+      <figure>{% include "icons/database.svg" %}</figure>
+      <h3>No sources yet</h3>
+      <p>{% if layout.admin %}Add a repository below to start.{% else %}An admin needs to add a repository.{% endif %}</p>
+    </header>
+  </div>
+  {% else %}
+  <div class="table-container rounded-lg border">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Repository</th>
+          <th>Weight</th>
+          <th class="hidden sm:table-cell">Scan</th>
+          <th>Status</th>
+          <th class="hidden md:table-cell">Last scan</th>
+          <th class="hidden lg:table-cell">Changed</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td>
+            <a href="/sources/{{ row.id }}" class="font-medium hover:underline">{{ row.repo }}</a>
+            <div class="text-xs text-muted-foreground">{{ row.provider }}</div>
+          </td>
+          <td>{{ row.weight }}</td>
+          <td class="hidden sm:table-cell text-muted-foreground">{{ row.scan_method }}</td>
+          <td>{% if row.enabled %}<span class="badge">enabled</span>{% else %}<span class="badge" data-variant="secondary">disabled</span>{% endif %}</td>
+          <td class="hidden md:table-cell text-muted-foreground">{{ row.last_scan }}</td>
+          <td class="hidden lg:table-cell text-muted-foreground" title="{{ row.updated_date }}">{{ row.updated }} by {{ row.updated_by }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% if layout.admin %}
+  <form method="post" action="/sources" class="card w-full sm:max-w-xl" autocomplete="off">
+    <input type="hidden" name="_csrf" value="{{ layout.csrf }}">
+    <header>
+      <h2>Add a source</h2>
+    </header>
+    <section class="flex flex-col gap-4">
+      {% if !error.is_empty() %}
+      <div class="alert" data-variant="destructive" role="alert">
+        {% include "icons/triangle-alert.svg" %}
+        <h2>{{ error }}</h2>
+      </div>
+      {% endif %}
+      <div class="field">
+        <label for="provider">Provider</label>
+        <select id="provider" class="select" name="provider">
+          {% for p in providers %}<option value="{{ p.value }}" {% if p.selected %}selected{% endif %}>{{ p.value }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="repo">Repository</label>
+        <input id="repo" type="text" name="repo" value="{{ form.repo }}" placeholder="owner/name" required spellcheck="false">
+        <p>As <code>owner/name</code>, or the repository's URL on the provider.</p>
+      </div>
+      <div class="field">
+        <label for="weight">Weight</label>
+        <input id="weight" type="text" inputmode="decimal" name="weight" value="{{ form.weight }}" required>
+        <p>Greater than 0, at most 100.</p>
+      </div>
+      <div class="field">
+        <label for="scan_method">Scan method</label>
+        <select id="scan_method" class="select" name="scan_method">
+          {% for m in methods %}<option value="{{ m.value }}" {% if m.selected %}selected{% endif %}>{{ m.value }}</option>{% endfor %}
+        </select>
+        <p><code>auto</code> uses the best method the provider offers.</p>
+      </div>
+    </section>
+    <footer>
+      <button type="submit" class="btn">Add source</button>
+    </footer>
+  </form>
+  {% endif %}
+</div>
+{% endblock %}

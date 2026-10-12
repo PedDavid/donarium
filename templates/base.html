@@ -20,6 +20,10 @@
         {% include "icons/database.svg" %}
         <span>donarium</span>
       </a>
+      <nav class="flex items-center gap-1 ms-2 text-sm" aria-label="Main">
+        <a href="/" class="btn" data-variant="{% if layout.section == "projects" %}secondary{% else %}ghost{% endif %}" data-size="sm">Projects</a>
+        <a href="/sources" class="btn" data-variant="{% if layout.section == "sources" %}secondary{% else %}ghost{% endif %}" data-size="sm">Sources</a>
+      </nav>
       <div class="ms-auto flex items-center gap-1">
         <button type="button" class="btn hidden sm:inline-flex text-muted-foreground" data-variant="outline" data-size="sm" data-palette-open aria-label="Search projects" aria-keyshortcuts="Control+K Meta+K">
           {% include "icons/search.svg" %}

@@ -33,6 +33,15 @@ pub struct Config {
     )]
     pub public_url: Url,
 
+    /// Database URL. Only SQLite is supported: `sqlite:///data/donarium.db`.
+    /// The file is created if it does not exist. Ignored with --demo.
+    #[arg(
+        long,
+        env = "DONARIUM_DATABASE_URL",
+        default_value = "sqlite://donarium.db"
+    )]
+    pub database_url: String,
+
     #[command(flatten)]
     pub auth: AuthConfig,
 
@@ -114,6 +123,12 @@ impl Config {
 
     /// Checks between flags that clap cannot express.
     pub fn check(&self) -> Result<(), String> {
+        if !self.database_url.starts_with("sqlite:") {
+            return Err(format!(
+                "--database-url must be a sqlite: URL (got {:?}); other databases are not supported yet",
+                self.database_url
+            ));
+        }
         Ok(())
     }
 
@@ -137,10 +152,21 @@ mod tests {
     fn defaults_parse() {
         let cfg = Config::try_parse_from(["donarium"]).unwrap();
         assert!(cfg.check().is_ok());
+        assert_eq!(cfg.database_url, "sqlite://donarium.db");
         assert_eq!(cfg.public_origin(), "http://localhost:8080");
         assert_eq!(
             cfg.url_for("/projects/a"),
             "http://localhost:8080/projects/a"
         );
+    }
+
+    #[test]
+    fn only_sqlite_urls_are_accepted() {
+        let cfg = Config::try_parse_from(["donarium", "--database-url", "postgres://db/donarium"])
+            .unwrap();
+        assert!(cfg.check().unwrap_err().contains("sqlite:"));
+        let cfg =
+            Config::try_parse_from(["donarium", "--database-url", "sqlite:///data/d.db"]).unwrap();
+        assert!(cfg.check().is_ok());
     }
 }

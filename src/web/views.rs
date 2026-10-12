@@ -2,7 +2,7 @@
 
 use jiff::{SignedDuration, Timestamp};
 
-use crate::model::Project;
+use crate::model::{Project, Source};
 
 pub fn fmt_date(t: Timestamp) -> String {
     t.strftime("%Y-%m-%d").to_string()
@@ -58,6 +58,55 @@ impl ProjectRow {
         let q = q.to_lowercase();
         self.name.to_lowercase().contains(&q) || self.repo.to_lowercase().contains(&q)
     }
+}
+
+/// A source turned into pre-formatted fields for the templates.
+#[derive(Clone, Debug)]
+pub struct SourceRow {
+    pub id: i64,
+    pub provider: &'static str,
+    pub repo: String,
+    /// Built from the provider's fixed host and a validated path.
+    pub url: String,
+    pub weight: String,
+    pub scan_method: &'static str,
+    pub enabled: bool,
+    pub last_scan: String,
+    pub last_scan_status: String,
+    pub updated_by: String,
+    pub updated: String,
+    pub updated_date: String,
+    pub created_by: String,
+    pub created_date: String,
+}
+
+impl SourceRow {
+    pub fn new(s: &Source, now: Timestamp) -> SourceRow {
+        SourceRow {
+            id: s.id,
+            provider: s.provider.as_str(),
+            repo: s.repo.clone(),
+            url: format!("https://{}/{}", s.provider.host(), s.repo),
+            weight: fmt_weight(s.weight),
+            scan_method: s.scan_method.as_str(),
+            enabled: s.enabled,
+            last_scan: s
+                .last_scan_at
+                .map(|t| relative(t, now))
+                .unwrap_or_else(|| "never".into()),
+            last_scan_status: s.last_scan_status.clone().unwrap_or_default(),
+            updated_by: s.updated_by.to_string(),
+            updated: relative(s.updated_at, now),
+            updated_date: fmt_date(s.updated_at),
+            created_by: s.created_by.to_string(),
+            created_date: fmt_date(s.created_at),
+        }
+    }
+}
+
+/// "1", "0.5", "0.25": no trailing zeros.
+pub fn fmt_weight(w: f64) -> String {
+    format!("{w}")
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use tracing_subscriber::EnvFilter;
 use donarium::config::Config;
 use donarium::demo;
 use donarium::metrics::Metrics;
-use donarium::repo::{MemoryRepository, Repository};
+use donarium::store::Store;
 use donarium::web::auth::AuthMode;
 use donarium::web::{self, AppState};
 
@@ -18,23 +18,25 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::load();
     init_tracing(cfg.log_json);
 
-    let repo: Arc<dyn Repository> = if cfg.demo {
+    let store = if cfg.demo {
         warn!("demo mode: serving sample data from memory");
-        Arc::new(MemoryRepository::new(demo::sample_projects(
-            jiff::Timestamp::now(),
-        )))
+        let store = Store::memory().await?;
+        demo::seed(&store, jiff::Timestamp::now()).await?;
+        store
     } else {
-        // The database arrives with the next milestone.
-        warn!("no storage configured yet: serving an empty project list");
-        Arc::new(MemoryRepository::default())
+        info!(database = %cfg.database_url, "opening the database");
+        Store::connect(&cfg.database_url)
+            .await
+            .with_context(|| format!("opening {}", cfg.database_url))?
     };
-    let metrics = Metrics::new(repo.clone());
+    let store = Arc::new(store);
+    let metrics = Metrics::new();
     let demo_dev_auth = cfg.demo && cfg.auth.oidc_issuer.is_none();
     let auth = AuthMode::from_config(&cfg.auth, &cfg.public_url, demo_dev_auth)?;
     let cookie_key = load_cookie_key(&cfg)?;
 
-    let ops = web::ops_router(repo.clone(), metrics.clone());
-    let state = AppState::new(cfg.clone(), repo, metrics, auth, cookie_key);
+    let ops = web::ops_router(store.clone(), metrics);
+    let state = AppState::new(cfg.clone(), store, auth, cookie_key);
     let app = web::router(state);
 
     let ui_listener = tokio::net::TcpListener::bind(cfg.listen).await?;

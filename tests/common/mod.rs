@@ -14,7 +14,7 @@ use http_body_util::BodyExt;
 use donarium::config::Config;
 use donarium::demo;
 use donarium::metrics::Metrics;
-use donarium::repo::{MemoryRepository, Repository};
+use donarium::store::Store;
 use donarium::web::auth::{AuthMode, SESSION_COOKIE, Session};
 use donarium::web::{AppState, ops_router, router};
 
@@ -26,12 +26,13 @@ pub const NOW: &str = "2026-09-26T12:00:00Z";
 pub struct Harness {
     pub app: Router,
     pub ops: Router,
+    pub store: Arc<Store>,
     pub key: Key,
 }
 
 /// The app with the demo projects. With `dev_auth` every visitor is logged in
 /// as an admin; without it, OIDC is configured and visitors must log in.
-pub fn harness(dev_auth: bool) -> Harness {
+pub async fn harness(dev_auth: bool) -> Harness {
     let mut args = vec!["donarium"];
     if dev_auth {
         args.push("--insecure-dev-auth");
@@ -45,15 +46,16 @@ pub fn harness(dev_auth: bool) -> Harness {
     }
     let cfg = Config::try_parse_from(args).unwrap();
     let now: jiff::Timestamp = NOW.parse().unwrap();
-    let repo: Arc<dyn Repository> = Arc::new(MemoryRepository::new(demo::sample_projects(now)));
-    let metrics = Metrics::new(repo.clone());
+    let store = Arc::new(Store::memory().await.unwrap());
+    demo::seed(&store, now).await.unwrap();
+    let metrics = Metrics::new();
     let auth = AuthMode::from_config(&cfg.auth, &cfg.public_url, false).unwrap();
     let key = Key::generate();
-    let state =
-        AppState::new(cfg, repo.clone(), metrics.clone(), auth, key.clone()).with_fixed_now(now);
+    let state = AppState::new(cfg, store.clone(), auth, key.clone()).with_fixed_now(now);
     Harness {
         app: router(state),
-        ops: ops_router(repo, metrics),
+        ops: ops_router(store.clone(), metrics),
+        store,
         key,
     }
 }
