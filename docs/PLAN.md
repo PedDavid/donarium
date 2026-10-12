@@ -98,6 +98,19 @@ by GitOps), they would write into these same tables.
 
 ## 4. Usage scanning
 
+There are two kinds of scan, chosen per source with its scan method:
+
+- **Dependencies** (`dependency-graph`, `sbom`, `lockfiles`): the libraries your
+  code depends on (4.1).
+- **Images** (`images`): the container images your deployment repositories run
+  (4.2), for Docker Compose projects such as a media server and for Kubernetes
+  repositories managed with Flux. This one is built first.
+
+`auto` picks dependencies for GitHub repositories and images for none; image
+scanning is always chosen explicitly.
+
+### 4.1 Dependency scans
+
 For each `Source`:
 
 1. **Collect dependencies**, in order of preference:
@@ -119,10 +132,49 @@ For each `Source`:
    `(platform, handle, url)`: GitHub Sponsors, Open Collective, Liberapay, Ko-fi,
    Patreon, thanks.dev, custom URL.
 
+### 4.2 Image scans
+
+1. **Fetch the repository as one archive** (GitHub and GitLab tarball, Gitea /
+   Forgejo `archive` endpoint) and read the YAML files from it in memory.
+   Nothing is written to disk and nothing is extracted, so archive paths cannot
+   escape anywhere. File count and size are capped.
+2. **Extract image references** (`src/scan/`):
+   - Docker Compose files, recognised by their content (`services:` and no
+     `apiVersion`), not by file name. `${VAR:-default}` uses the default; a
+     variable only in the tag drops the tag and keeps the repository; a
+     variable in the name is listed as skipped.
+   - Kubernetes manifests: `containers`, `initContainers` and
+     `ephemeralContainers` of any kind (Deployments, CronJobs, …).
+   - Flux and Kustomize: `images:` overrides in Kustomizations, and `image`
+     blocks (`repository` / `tag` / `digest`) in HelmRelease values and Helm
+     `values*.yaml` files.
+   - ConfigMaps, Secrets and CRDs are ignored. Helm charts are not rendered, so
+     an image a chart chooses itself is not seen.
+3. **Resolve an image to an upstream project:**
+   - `ghcr.io/owner/name` maps to `github.com/owner/name`, and
+     `registry.gitlab.com/group/name` to `gitlab.com/group/name`.
+   - Other registries (Docker Hub, Quay, `lscr.io`, …): the image's
+     `org.opencontainers.image.source` label, read anonymously from the
+     registry, and cached per repository.
+   - **Packager images** (e.g. `linuxserver/sonarr`) resolve to the packaging
+     repository, as their label says. An admin can remap an image to the
+     application's own repository. Mappings are stored and win over the label.
+   - Images that cannot be resolved are listed on the source's page, with the
+     file they came from, so an admin can map them by hand.
+4. **Write usage:** one `direct` usage per resolved project (an image you run is
+   a direct use), weighted by the source's weight like any other.
+
 Scans run on a schedule (default daily, `--scan-interval`), on demand from the
-UI, and after a `Source` changes. Credentials are a GitHub token (read-only
-metadata and dependency graph) from a mounted Secret. Hosts are fixed in code
-and requests go through a rate-limit-aware client with ETag caching.
+UI, and after a `Source` changes. Requests go through a rate-limit-aware client
+with ETag caching.
+
+**Forges and credentials.** GitHub and GitLab have fixed hosts. A self-hosted
+**Gitea or Forgejo** has no fixed host, so its base URL comes from the server
+configuration (`--gitea-url`, one per instance), never from a form. The source's
+provider is `gitea` (it covers Forgejo, whose API is compatible), and moving
+the repository from Gitea to Forgejo only means changing that URL. Each forge has
+its own read-only token, mounted from a Secret and sent only to its own host.
+Public repositories (the GitLab media server) need no token.
 
 Known limits to state in the README: the dependency graph only sees what's
 committed, so unpinned or vendored dependencies are missed. Monorepo packages
@@ -270,8 +322,11 @@ without receipts, and an optional "no donation in N days" reminder.
 - Secrets (GitHub token, Paperless token, S3 credentials) come from mounted
   files, held in `SecretString`, and never logged.
 - Provider and Paperless/S3 hosts are fixed by config, never taken from
-  user-entered data, so a source or override cannot redirect a credential.
-  Source repositories are validated as `owner/name` against the fixed provider host.
+  user-entered data, so a source or override cannot redirect a credential. The
+  hosts of self-hosted forges (Gitea, Forgejo) are part of that configuration, and
+  a source can only name one of them. Source repositories are validated as
+  `owner/name` against the configured host. Each forge token is sent only to its
+  own host. Registry lookups for image labels are anonymous.
 - Uploads are size-limited and type-checked, and are never rendered inline.
 
 ## 10. Milestones
@@ -282,8 +337,15 @@ without receipts, and an optional "no donation in N days" reminder.
 2. **Storage.** SQLite schema and migrations (`sqlx`), a `Repository` backed by
    it, the PVC in the Helm chart, and the UI to add, edit, disable and delete
    sources (admin only, with audit fields).
-3. **Scanner.** GitHub dependency-graph/SBOM first, then deps.dev resolution,
-   aggregation, and the usage table. `wiremock` tests with recorded fixtures.
+3. **Scanner.** Image scans first:
+   - 3a (done): image reference parsing and extraction from Compose, Kubernetes
+     and Flux files, tested on realistic fixtures.
+   - 3b: fetching archives (GitLab, Gitea/Forgejo, GitHub), image → project
+     resolution and mappings, writing usage, the `gitea` provider, and the
+     UI for skipped and unresolved images.
+   - 3c: dependency scans: GitHub dependency-graph/SBOM, deps.dev resolution,
+     aggregation.
+   `wiremock` tests with recorded fixtures.
 4. **Ranking and views.** List by `priority`, detail view with usage, timeline,
    fair share and funding; snapshot and screenshot tests as in clavium.
 5. **Donations.** Record, void, totals, recurring entries, `FUNDING.yml`

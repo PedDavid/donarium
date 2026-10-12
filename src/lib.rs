@@ -3,6 +3,7 @@ pub mod demo;
 pub mod duration;
 pub mod metrics;
 pub mod model;
+pub mod scan;
 pub mod store;
 pub mod validation;
 pub mod web;
