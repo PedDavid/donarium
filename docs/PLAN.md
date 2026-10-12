@@ -151,15 +151,43 @@ Recording flow (admin only):
 
 ```sql
 donation(id, project, platform, amount_minor, currency, donated_at,
+         base_amount_minor NULL, fx_rate NULL, fx_source /* ecb | manual */ NULL,
          kind /* one_off | recurring */, note, recorded_by, recorded_at,
          voids_id NULL, receipt_id NULL)
 receipt(id, donation_id, store /* paperless | s3 */, ref /* doc id or key */,
         url, filename, content_type, sha256 NULL, created_at)
+fx_rate(date, currency, rate_to_base, base)   -- cache of fetched rates
 ```
 
-Totals are shown per currency. No conversion in v1. A recurring donation
-repeats as a monthly "expected" entry that you confirm, because the app can't
-see your bank.
+A recurring donation repeats as a monthly "expected" entry that you confirm,
+because the app can't see your bank.
+
+### 6.1 Currency conversion
+
+- Each donation keeps its **original** `amount_minor` + `currency` (the figure
+  on the receipt) and a **base amount** (`base_amount_minor`, `fx_rate`,
+  `fx_source`) converted once, when it is recorded. Totals never shift when
+  rates move later.
+- `--base-currency` (default `EUR`) is the currency for totals, the fair-share
+  bars and metrics. Changing it later only affects donations recorded after the
+  change; a `donarium reconvert` subcommand re-derives base amounts from the
+  cached rates if needed.
+- **Rates** come from [Frankfurter](https://frankfurter.dev) (ECB reference
+  rates): free, no key, historical by date. A weekend or holiday uses the
+  previous business day. The host is fixed in code (`--fx-url` overrides it for
+  tests and self-hosted mirrors). Results are cached in `fx_rate`.
+- **Override.** The record form pre-fills the rate and base amount. An admin can
+  edit them when the real charge differed (card fees, a different rate), which
+  sets `fx_source = manual`. Currencies the ECB doesn't publish (e.g. crypto)
+  require a manual rate.
+- **Failure handling.** If the lookup fails, recording is not blocked: the
+  donation is saved with the base amount empty, and a retry task fills it in
+  later. Donations without a base amount are excluded from base totals, shown
+  with a marker, and counted in a metric.
+- Original amounts per currency are always shown alongside base totals in the
+  detail view. This is a tracking aid, not tax advice: the receipt and bank
+  statement stay the source of truth. A CSV export with the original amount,
+  rate and receipt reference is a later milestone.
 
 ## 7. Receipts
 
@@ -203,7 +231,10 @@ pub trait ReceiptStore: Send + Sync {
 | `donarium_project_usage_score{project}` | Current usage score |
 | `donarium_project_priority{project}` | Ranking value (top N only, to bound cardinality) |
 | `donarium_last_donation_timestamp_seconds{project}` | |
-| `donarium_donated_total{currency}` | Sum of non-void donations (gauge) |
+| `donarium_donated_base_total` | Sum of non-void donations in the base currency (gauge) |
+| `donarium_donated_original_total{currency}` | Sum in the original currencies |
+| `donarium_donations_without_conversion` | Donations still missing a base amount |
+| `donarium_fx_requests_total{result}` | Rate lookups |
 | `donarium_donations_without_receipt` | Receipt hygiene |
 | `donarium_scan_last_success_timestamp_seconds{source}` | Alert when scans go stale |
 | `donarium_scan_requests_total{provider,result}` | |
@@ -235,14 +266,15 @@ without receipts, and an optional "no donation in N days" reminder.
 4. **Ranking and views.** List by `priority`, detail view with usage, timeline,
    fair share and funding; snapshot and screenshot tests as in clavium.
 5. **Donations.** Record, void, totals, recurring entries, `FUNDING.yml`
-   discovery.
+   discovery, currency conversion (Frankfurter client, rate cache, manual
+   override, retry task).
 6. **Receipts.** `ReceiptStore` trait, Paperless backend (search, link,
    suggestions), then S3 backend (upload, presigned download); integration
    tests against Paperless and MinIO containers.
 7. **Metrics, alerts, dashboard, docs.** Rules checked with `promtool`, Grafana
    dashboard, README, example manifests.
 8. **Later.** Lockfile parsers for ecosystems without SBOM support, GitLab,
-   currency conversion, CSV/tax-year export, a Paperless matcher for late
+   CSV/tax-year export, a Paperless matcher for late
    receipts.
 
 ## 11. Open points
