@@ -24,6 +24,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::config::Config;
 use crate::metrics::Metrics;
+use crate::scan::run::Scanner;
 use crate::store::{Store, StoreError};
 use auth::AuthMode;
 
@@ -35,6 +36,7 @@ pub struct AppState {
 pub struct Inner {
     pub cfg: Config,
     pub store: Arc<Store>,
+    pub scanner: Arc<Scanner>,
     pub auth: AuthMode,
     pub cookie_key: Key,
     pub asset_version: String,
@@ -43,11 +45,18 @@ pub struct Inner {
 }
 
 impl AppState {
-    pub fn new(cfg: Config, store: Arc<Store>, auth: AuthMode, cookie_key: Key) -> Self {
+    pub fn new(
+        cfg: Config,
+        store: Arc<Store>,
+        scanner: Arc<Scanner>,
+        auth: AuthMode,
+        cookie_key: Key,
+    ) -> Self {
         AppState {
             inner: Arc::new(Inner {
                 cfg,
                 store,
+                scanner,
                 auth,
                 cookie_key,
                 asset_version: asset_version(),
@@ -233,6 +242,9 @@ pub fn router(state: AppState) -> Router {
         .route("/sources", get(sources::index).post(sources::create))
         .route("/sources/{id}", get(sources::detail).post(sources::update))
         .route("/sources/{id}/delete", post(sources::delete))
+        .route("/sources/{id}/scan", post(sources::scan))
+        .route("/image-mappings", post(sources::map_image))
+        .route("/image-mappings/delete", post(sources::unmap_image))
         .route("/auth/login", get(auth::login))
         .route("/auth/callback", get(auth::callback))
         .route("/auth/logout", post(auth::logout))

@@ -73,6 +73,8 @@ pub struct SourceRow {
     pub enabled: bool,
     pub last_scan: String,
     pub last_scan_status: String,
+    /// Whether the last scan worked; `None` before the first one.
+    pub last_scan_ok: Option<bool>,
     pub updated_by: String,
     pub updated: String,
     pub updated_date: String,
@@ -95,6 +97,7 @@ impl SourceRow {
                 .map(|t| relative(t, now))
                 .unwrap_or_else(|| "never".into()),
             last_scan_status: s.last_scan_status.clone().unwrap_or_default(),
+            last_scan_ok: s.last_scan_ok,
             updated_by: s.updated_by.to_string(),
             updated: relative(s.updated_at, now),
             updated_date: fmt_date(s.updated_at),

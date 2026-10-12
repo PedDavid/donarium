@@ -37,6 +37,21 @@ out=$(render --set persistence.enabled=false)
 [[ $(yq 'select(.kind == "Deployment") | .spec.template.spec.volumes[] | select(.name == "data") | has("emptyDir")' <<<"$out") == true ]] \
   || fail "persistence.enabled=false does not use an emptyDir"
 
+# Image scans: the GitLab token is mounted and passed as a file only when a
+# Secret is named, and the interval and extra registries reach the container.
+out=$(render --set gitlab.tokenSecret.existingSecret=gl --set scanInterval=6h --set registryAllow='{reg.example.com,other.example.org}')
+env=$(yq 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env' <<<"$out")
+[[ $(yq '.[] | select(.name == "DONARIUM_GITLAB_TOKEN_FILE") | .value' <<<"$env") == /etc/donarium/gitlab/token ]] \
+  || fail "the GitLab token file is not passed"
+[[ $(yq '.[] | select(.name == "DONARIUM_SCAN_INTERVAL") | .value' <<<"$env") == 6h ]] || fail "scanInterval is not passed"
+[[ $(yq '.[] | select(.name == "DONARIUM_REGISTRY_ALLOW") | .value' <<<"$env") == reg.example.com,other.example.org ]] \
+  || fail "registryAllow is not passed"
+[[ $(yq 'select(.kind == "Deployment") | .spec.template.spec.volumes[] | select(.name == "gitlab-token") | .secret.secretName' <<<"$out") == gl ]] \
+  || fail "the GitLab token Secret is not mounted"
+env=$(render | yq 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env')
+[[ -z $(yq '.[] | select(.name == "DONARIUM_GITLAB_TOKEN_FILE")' <<<"$env") ]] || fail "a token file is passed without a Secret"
+[[ $(yq '.[] | select(.name == "DONARIUM_GITLAB_URL") | .value' <<<"$env") == https://gitlab.com ]] || fail "the GitLab URL default is wrong"
+
 # The default image tag is the chart's appVersion, which the release
 # workflow publishes (see .github/workflows/release.yml).
 app=$(yq '.appVersion' "$chart/Chart.yaml")

@@ -42,6 +42,29 @@ pub struct Config {
     )]
     pub database_url: String,
 
+    /// Base URL of the GitLab instance that GitLab sources live on.
+    #[arg(
+        long,
+        env = "DONARIUM_GITLAB_URL",
+        default_value = "https://gitlab.com"
+    )]
+    pub gitlab_url: Url,
+
+    /// File with a GitLab access token (read_api scope) for private
+    /// repositories. Public repositories need none. Sent only to --gitlab-url.
+    #[arg(long, env = "DONARIUM_GITLAB_TOKEN_FILE")]
+    pub gitlab_token_file: Option<PathBuf>,
+
+    /// How often all sources are scanned. 0s turns scheduled scans off; scans
+    /// can still be started from the UI.
+    #[arg(long, env = "DONARIUM_SCAN_INTERVAL", default_value = "24h", value_parser = parse_duration)]
+    pub scan_interval: SignedDuration,
+
+    /// Registries to read image labels from, besides the built-in public ones
+    /// (Docker Hub, ghcr.io, quay.io, …). Anonymous access only.
+    #[arg(long, env = "DONARIUM_REGISTRY_ALLOW", value_delimiter = ',')]
+    pub registry_allow: Vec<String>,
+
     #[command(flatten)]
     pub auth: AuthConfig,
 
@@ -153,6 +176,9 @@ mod tests {
         let cfg = Config::try_parse_from(["donarium"]).unwrap();
         assert!(cfg.check().is_ok());
         assert_eq!(cfg.database_url, "sqlite://donarium.db");
+        assert_eq!(cfg.gitlab_url.as_str(), "https://gitlab.com/");
+        assert_eq!(cfg.scan_interval, SignedDuration::from_hours(24));
+        assert!(cfg.registry_allow.is_empty());
         assert_eq!(cfg.public_origin(), "http://localhost:8080");
         assert_eq!(
             cfg.url_for("/projects/a"),

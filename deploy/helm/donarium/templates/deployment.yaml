@@ -41,6 +41,18 @@ spec:
               value: {{ required "publicUrl is required" .Values.publicUrl | quote }}
             - name: DONARIUM_DATABASE_URL
               value: sqlite:///data/donarium.db
+            - name: DONARIUM_GITLAB_URL
+              value: {{ .Values.gitlab.url | quote }}
+            {{- if .Values.gitlab.tokenSecret.existingSecret }}
+            - name: DONARIUM_GITLAB_TOKEN_FILE
+              value: /etc/donarium/gitlab/{{ .Values.gitlab.tokenSecret.key }}
+            {{- end }}
+            - name: DONARIUM_SCAN_INTERVAL
+              value: {{ .Values.scanInterval | quote }}
+            {{- with .Values.registryAllow }}
+            - name: DONARIUM_REGISTRY_ALLOW
+              value: {{ join "," . | quote }}
+            {{- end }}
             - name: DONARIUM_COOKIE_KEY_FILE
               value: /etc/donarium/cookie/cookie-key
             {{- if .Values.insecureDevAuth }}
@@ -95,6 +107,11 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            {{- if .Values.gitlab.tokenSecret.existingSecret }}
+            - name: gitlab-token
+              mountPath: /etc/donarium/gitlab
+              readOnly: true
+            {{- end }}
             - name: cookie-key
               mountPath: /etc/donarium/cookie
               readOnly: true
@@ -111,6 +128,11 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
+        {{- if .Values.gitlab.tokenSecret.existingSecret }}
+        - name: gitlab-token
+          secret:
+            secretName: {{ .Values.gitlab.tokenSecret.existingSecret }}
+        {{- end }}
         - name: cookie-key
           secret:
             secretName: {{ include "donarium.cookieSecretName" . }}

@@ -15,7 +15,10 @@ use super::pages::Layout;
 use super::views::{SourceRow, fmt_weight};
 use super::{AppError, AppState};
 use crate::model::{NewSource, Provider, ScanMethod, SourceUpdate};
-use crate::store::StoreError;
+use crate::scan::manifests::Skipped;
+use crate::scan::resolve::parse_project_repo;
+use crate::scan::usage::How;
+use crate::store::{ImageReport, StoreError};
 use crate::validation::{parse_repo, parse_weight};
 
 /// Values of the add/edit forms, kept so a rejected submission is not lost.
@@ -103,6 +106,9 @@ fn notice(code: &str) -> &'static str {
         "added" => "Source added.",
         "saved" => "Changes saved.",
         "deleted" => "Source deleted.",
+        "scanning" => "Scan started. Reload in a moment to see the result.",
+        "mapped" => "Image mapped. Usage was updated.",
+        "unmapped" => "Mapping removed. Usage was updated.",
         _ => "",
     }
 }
@@ -251,6 +257,41 @@ struct DetailPage {
     form: FormValues,
     methods: Vec<SelectOption>,
     error: String,
+    /// Why this source cannot be scanned, if it cannot.
+    scan_problem: String,
+    scanning: bool,
+    images: Vec<ImageRow>,
+    skipped: Vec<Skipped>,
+}
+
+/// An image found in a source, as the page shows it.
+pub struct ImageRow {
+    pub registry: String,
+    pub repository: String,
+    pub tags: String,
+    pub file: String,
+    pub uses: i64,
+    pub project: String,
+    /// "mapped by an admin", "from the image's source label", …
+    pub how: &'static str,
+    pub mapped: bool,
+    pub note: String,
+}
+
+impl From<ImageReport> for ImageRow {
+    fn from(r: ImageReport) -> ImageRow {
+        ImageRow {
+            registry: r.registry,
+            repository: r.repository,
+            tags: r.tags,
+            file: r.file,
+            uses: r.uses,
+            project: r.resolved.project.unwrap_or_default(),
+            how: r.resolved.how.map(How::as_str).unwrap_or(""),
+            mapped: r.resolved.how == Some(How::Mapping),
+            note: r.resolved.note.unwrap_or_default(),
+        }
+    }
 }
 
 pub async fn detail(
@@ -273,7 +314,7 @@ pub async fn detail(
         session: &session,
         jar: &jar,
     };
-    render_detail(&ctx, &source, form, Feedback::ok(notice(&q.notice)))
+    render_detail(&ctx, &source, form, Feedback::ok(notice(&q.notice))).await
 }
 
 async fn load(state: &AppState, id: i64) -> Result<crate::model::Source, AppError> {
@@ -285,12 +326,19 @@ async fn load(state: &AppState, id: i64) -> Result<crate::model::Source, AppErro
         .ok_or_else(|| AppError::NotFound(format!("no source with id {id}")))
 }
 
-fn render_detail(
+async fn render_detail(
     ctx: &Ctx<'_>,
     source: &crate::model::Source,
     form: FormValues,
     feedback: Feedback,
 ) -> Result<Response, AppError> {
+    let store = &ctx.state.inner.store;
+    let images = store
+        .image_report(source.id)
+        .await?
+        .into_iter()
+        .map(ImageRow::from)
+        .collect();
     let page = DetailPage {
         layout: Layout::new(ctx.state, ctx.session, ctx.jar, source.repo.clone())
             .section("sources"),
@@ -299,6 +347,16 @@ fn render_detail(
         methods: method_options(&form.scan_method),
         form,
         error: feedback.error,
+        scan_problem: ctx
+            .state
+            .inner
+            .scanner
+            .can_scan(source)
+            .err()
+            .unwrap_or_default(),
+        scanning: ctx.state.inner.scanner.is_running(source.id),
+        images,
+        skipped: store.skipped_images(source.id).await?,
     };
     Ok((feedback.status, Html(page.render()?)).into_response())
 }
@@ -352,7 +410,7 @@ pub async fn update(
                 jar: &jar,
             };
             let rejected = Feedback::rejected(error, StatusCode::UNPROCESSABLE_ENTITY);
-            return render_detail(&ctx, &source, values, rejected);
+            return render_detail(&ctx, &source, values, rejected).await;
         }
     };
     state
@@ -380,6 +438,132 @@ pub async fn delete(
     session.check_csrf(&headers, form.csrf.as_deref())?;
     let source = load(&state, id).await?;
     state.inner.store.delete_source(id).await?;
+    // Projects only this source used are no longer used by anything.
+    state
+        .inner
+        .store
+        .rebuild_image_usage(jiff::Timestamp::now())
+        .await?;
     info!(actor = %session.sub, source = id, repo = %source.repo, "source deleted");
     Ok(Redirect::to("/sources?notice=deleted").into_response())
+}
+
+/// Starts a scan in the background and returns at once: a scan can take
+/// minutes, and its result is shown on the source's page when it is done.
+pub async fn scan(
+    State(state): State<AppState>,
+    Admin(session): Admin,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Form(form): Form<CsrfOnly>,
+) -> Result<Response, AppError> {
+    session.check_csrf(&headers, form.csrf.as_deref())?;
+    let source = load(&state, id).await?;
+    if !source.enabled {
+        return Err(AppError::BadRequest("the source is disabled".into()));
+    }
+    state
+        .inner
+        .scanner
+        .can_scan(&source)
+        .map_err(AppError::BadRequest)?;
+    if state.inner.scanner.is_running(id) {
+        return Err(AppError::BadRequest(
+            "this source is already being scanned".into(),
+        ));
+    }
+    info!(actor = %session.sub, source = id, repo = %source.repo, "scan requested");
+    let scanner = state.inner.scanner.clone();
+    tokio::spawn(async move {
+        // The outcome is saved on the source and logged by the scanner.
+        let _ = scanner.scan_source(id).await;
+    });
+    Ok(Redirect::to(&format!("/sources/{id}?notice=scanning")).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct MapForm {
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
+    source_id: i64,
+    registry: String,
+    repository: String,
+    #[serde(default)]
+    project_repo: String,
+}
+
+/// An image name as it appears in the page: short, printable, and not empty.
+fn plausible(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 255 && !name.chars().any(char::is_control)
+}
+
+pub async fn map_image(
+    State(state): State<AppState>,
+    Admin(session): Admin,
+    jar: CookieJar,
+    headers: HeaderMap,
+    Form(form): Form<MapForm>,
+) -> Result<Response, AppError> {
+    session.check_csrf(&headers, form.csrf.as_deref())?;
+    if !plausible(&form.registry) || !plausible(&form.repository) {
+        return Err(AppError::BadRequest("invalid image".into()));
+    }
+    let source = load(&state, form.source_id).await?;
+    let Some(project) = parse_project_repo(&form.project_repo) else {
+        let ctx = Ctx {
+            state: &state,
+            session: &session,
+            jar: &jar,
+        };
+        let values = FormValues {
+            provider: source.provider.as_str().into(),
+            repo: source.repo.clone(),
+            weight: fmt_weight(source.weight),
+            scan_method: source.scan_method.as_str().into(),
+            enabled: source.enabled,
+        };
+        let rejected = Feedback::rejected(
+            "enter the project as host/owner/name, e.g. github.com/qdm12/gluetun",
+            StatusCode::UNPROCESSABLE_ENTITY,
+        );
+        return render_detail(&ctx, &source, values, rejected).await;
+    };
+    let store = &state.inner.store;
+    store
+        .set_mapping(
+            &form.registry,
+            &form.repository,
+            &project,
+            &session.actor(),
+            jiff::Timestamp::now(),
+        )
+        .await?;
+    store.rebuild_image_usage(jiff::Timestamp::now()).await?;
+    info!(actor = %session.sub, registry = %form.registry, image = %form.repository, %project, "image mapped");
+    Ok(Redirect::to(&format!("/sources/{}?notice=mapped", form.source_id)).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct UnmapForm {
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
+    source_id: i64,
+    registry: String,
+    repository: String,
+}
+
+pub async fn unmap_image(
+    State(state): State<AppState>,
+    Admin(session): Admin,
+    headers: HeaderMap,
+    Form(form): Form<UnmapForm>,
+) -> Result<Response, AppError> {
+    session.check_csrf(&headers, form.csrf.as_deref())?;
+    let store = &state.inner.store;
+    store
+        .delete_mapping(&form.registry, &form.repository)
+        .await?;
+    store.rebuild_image_usage(jiff::Timestamp::now()).await?;
+    info!(actor = %session.sub, registry = %form.registry, image = %form.repository, "image mapping removed");
+    Ok(Redirect::to(&format!("/sources/{}?notice=unmapped", form.source_id)).into_response())
 }

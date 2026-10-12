@@ -36,6 +36,23 @@ persistence:
   # Keep the claim (and the data) when the release is uninstalled.
   keepOnUninstall: true
 
+# Image scans: GitLab sources are read through the GitLab API.
+gitlab:
+  url: https://gitlab.com
+  # Secret holding a read_api access token, for private repositories. Public
+  # repositories need none. The token is only ever sent to `url`.
+  tokenSecret:
+    existingSecret: ""
+    key: token
+
+# How often all sources are scanned. "0s" turns scheduled scans off (they can
+# still be started from the UI).
+scanInterval: 24h
+
+# Registries to read image labels from besides the built-in public ones
+# (Docker Hub, ghcr.io, quay.io, ...). Anonymous access only.
+registryAllow: []
+
 # Development only: every visitor is an admin.
 insecureDevAuth: false
 

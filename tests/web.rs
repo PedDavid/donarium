@@ -551,3 +551,366 @@ async fn source_pages_escape_what_they_show() {
     let html = body(res).await;
     assert!(!html.contains("<script>alert(1)"), "{html}");
 }
+
+// --- image scans ---
+
+/// The demo's GitLab source (the third one added) has an image scan: Jellyfin
+/// and the linuxserver images with labels, paperless guessed from its name, and
+/// gluetun without any project.
+const GITLAB_SOURCE: i64 = 3;
+
+fn post(path: &str, cookie: &str, pairs: &[(&str, &str)]) -> Request<Body> {
+    form_post(path, cookie, Some(ORIGIN), &encode(pairs))
+}
+
+#[tokio::test]
+async fn the_source_page_lists_images_and_what_they_resolve_to() {
+    let h = harness(false).await;
+    let reader = session_cookie(&h.key, &session(false));
+    let res = h
+        .app
+        .oneshot(get(&format!("/sources/{GITLAB_SOURCE}"), &reader))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = body(res).await;
+    assert!(html.contains("docker.io/jellyfin/jellyfin"));
+    assert!(html.contains("github.com/jellyfin/jellyfin"));
+    assert!(
+        html.contains("from the image&#39;s source label")
+            || html.contains("from the image's source label"),
+        "{html}"
+    );
+    assert!(html.contains("github.com/paperless-ngx/paperless-ngx"));
+    assert!(html.contains("guessed from the image name"));
+    assert!(html.contains("no project"), "gluetun has none");
+    assert!(html.contains("image not found (it may be private)"));
+    assert!(html.contains("image reference(s) skipped"));
+    assert!(html.contains("PROXY_IMAGE"));
+    // Readers see everything but cannot change anything.
+    assert!(!html.contains("/image-mappings"));
+    assert!(!html.contains("Scan now"));
+}
+
+#[tokio::test]
+async fn admins_map_an_unresolved_image_and_remove_the_mapping() {
+    let h = harness(false).await;
+    let admin = session_cookie(&h.key, &session(true));
+    let names = |h: &Harness| {
+        let store = h.store.clone();
+        async move {
+            store
+                .list_projects()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|p| p.name)
+                .collect::<Vec<_>>()
+        }
+    };
+    assert!(!names(&h).await.contains(&"qdm12-gluetun".to_string()));
+
+    let source_id = GITLAB_SOURCE.to_string();
+    let res = h
+        .app
+        .clone()
+        .oneshot(post(
+            "/image-mappings",
+            &admin,
+            &[
+                ("_csrf", "csrf-token"),
+                ("source_id", &source_id),
+                ("registry", "docker.io"),
+                ("repository", "qmcgaw/gluetun"),
+                ("project_repo", "https://github.com/QDM12/gluetun"),
+            ],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(res.headers()[header::LOCATION], "/sources/3?notice=mapped");
+    assert!(names(&h).await.contains(&"qdm12-gluetun".to_string()));
+
+    let res = h
+        .app
+        .clone()
+        .oneshot(get("/sources/3?notice=mapped", &admin))
+        .await
+        .unwrap();
+    let html = body(res).await;
+    assert!(html.contains("Image mapped."));
+    assert!(html.contains("mapped by an admin"));
+    assert!(html.contains("Remove mapping"));
+
+    let res = h
+        .app
+        .clone()
+        .oneshot(post(
+            "/image-mappings/delete",
+            &admin,
+            &[
+                ("_csrf", "csrf-token"),
+                ("source_id", &source_id),
+                ("registry", "docker.io"),
+                ("repository", "qmcgaw/gluetun"),
+            ],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert!(!names(&h).await.contains(&"qdm12-gluetun".to_string()));
+}
+
+#[tokio::test]
+async fn a_bad_project_is_rejected_with_a_message() {
+    let h = harness(false).await;
+    let admin = session_cookie(&h.key, &session(true));
+    let res = h
+        .app
+        .oneshot(post(
+            "/image-mappings",
+            &admin,
+            &[
+                ("_csrf", "csrf-token"),
+                ("source_id", "3"),
+                ("registry", "docker.io"),
+                ("repository", "qmcgaw/gluetun"),
+                // Without a host it is ambiguous.
+                ("project_repo", "qdm12/gluetun"),
+            ],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body(res).await.contains("host/owner/name"));
+    assert!(h.store.list_mappings().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn image_changes_need_admin_csrf_and_origin() {
+    let h = harness(false).await;
+    let admin = session_cookie(&h.key, &session(true));
+    let reader = session_cookie(&h.key, &session(false));
+    let map = |csrf: &str| {
+        [
+            ("_csrf", csrf.to_string()),
+            ("source_id", "3".to_string()),
+            ("registry", "docker.io".to_string()),
+            ("repository", "qmcgaw/gluetun".to_string()),
+            ("project_repo", "github.com/qdm12/gluetun".to_string()),
+        ]
+    };
+    let send = |cookie: &str, origin: Option<&str>, csrf: &str, path: &str| {
+        let pairs = map(csrf);
+        let refs: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        form_post(path, cookie, origin, &encode(&refs))
+    };
+    for path in [
+        "/image-mappings",
+        "/image-mappings/delete",
+        "/sources/3/scan",
+    ] {
+        let r = |req| h.app.clone().oneshot(req);
+        assert_eq!(
+            r(send(&reader, Some(ORIGIN), "csrf-token", path))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN,
+            "reader {path}"
+        );
+        assert_eq!(
+            r(send(&admin, Some(ORIGIN), "wrong", path))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN,
+            "csrf {path}"
+        );
+        assert_eq!(
+            r(send(&admin, None, "csrf-token", path))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN,
+            "origin {path}"
+        );
+    }
+    assert!(h.store.list_mappings().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn scans_say_when_they_are_not_available() {
+    let h = harness(false).await;
+    let admin = session_cookie(&h.key, &session(true));
+    let res = h
+        .app
+        .clone()
+        .oneshot(get("/sources/3", &admin))
+        .await
+        .unwrap();
+    let html = body(res).await;
+    assert!(html.contains("GitLab is not configured"), "{html}");
+    assert!(!html.contains("Scan now"));
+    let res = h
+        .app
+        .oneshot(post("/sources/3/scan", &admin, &[("_csrf", "csrf-token")]))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert!(body(res).await.contains("GitLab is not configured"));
+}
+
+#[tokio::test]
+async fn scan_now_runs_in_the_background_and_shows_the_result() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let (gitlab, registry) = (MockServer::start().await, MockServer::start().await);
+    Mock::given(method("GET"))
+        .and(path(
+            "/api/v4/projects/homelab%2Fdashboards/repository/archive.tar.gz",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(archive(&[(
+            "stack/compose.yaml",
+            "services:\n  grafana:\n    image: grafana/grafana:11\n",
+        )])))
+        .mount(&gitlab)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/grafana/grafana/manifests/11"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"config": {"digest": "sha256:c"}})),
+        )
+        .mount(&registry)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/grafana/grafana/blobs/sha256:c"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"config": {"Labels": {"org.opencontainers.image.source": "https://github.com/grafana/grafana"}}})))
+        .mount(&registry)
+        .await;
+
+    let h = harness_scanning(&gitlab.uri(), &registry.uri()).await;
+    let res = h
+        .app
+        .clone()
+        .oneshot(get("/sources/3", "x=y"))
+        .await
+        .unwrap();
+    assert!(body(res).await.contains("Scan now"));
+
+    let res = h
+        .app
+        .clone()
+        .oneshot(
+            Request::post("/sources/3/scan")
+                .header(header::ORIGIN, ORIGIN)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!("_csrf={}", dev_csrf(&h).await)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers()[header::LOCATION],
+        "/sources/3?notice=scanning"
+    );
+
+    // The scan runs on its own; wait for it to finish.
+    for _ in 0..200 {
+        if !h.scanner.is_running(3)
+            && h.store
+                .get_source(3)
+                .await
+                .unwrap()
+                .unwrap()
+                .last_scan_status
+                .as_deref()
+                != Some("5 images, 4 projects, 1 unresolved, 1 skipped")
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let source = h.store.get_source(3).await.unwrap().unwrap();
+    assert_eq!(
+        source.last_scan_ok,
+        Some(true),
+        "{:?}",
+        source.last_scan_status
+    );
+    assert_eq!(
+        source.last_scan_status.as_deref(),
+        Some("1 images, 1 projects")
+    );
+    let names: Vec<String> = h
+        .store
+        .list_projects()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    assert!(names.contains(&"grafana-grafana".to_string()), "{names:?}");
+    assert!(
+        !names.contains(&"jellyfin-jellyfin".to_string()),
+        "the demo's old findings were replaced"
+    );
+
+    let res = h.app.oneshot(get("/sources/3", "x=y")).await.unwrap();
+    let html = body(res).await;
+    assert!(html.contains("docker.io/grafana/grafana"));
+    assert!(html.contains("1 images, 1 projects"));
+}
+
+/// With dev auth every visitor is an admin; its CSRF token is on any page.
+async fn dev_csrf(h: &Harness) -> String {
+    let res = h
+        .app
+        .clone()
+        .oneshot(Request::get("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let html = body(res).await;
+    let marker = "X-CSRF-Token\": \"";
+    let start = html.find(marker).expect("the page carries a CSRF token") + marker.len();
+    html[start..start + html[start..].find('"').unwrap()].to_string()
+}
+
+#[tokio::test]
+async fn deleting_a_source_removes_the_projects_only_it_used() {
+    let h = harness(false).await;
+    let admin = session_cookie(&h.key, &session(true));
+    let before: Vec<String> = h
+        .store
+        .list_projects()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    assert!(before.contains(&"jellyfin-jellyfin".to_string()));
+    let res = h
+        .app
+        .oneshot(form_post(
+            "/sources/3/delete",
+            &admin,
+            Some(ORIGIN),
+            "_csrf=csrf-token",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let after: Vec<String> = h
+        .store
+        .list_projects()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    assert!(!after.contains(&"jellyfin-jellyfin".to_string()));
+    // Projects that other sources use stay.
+    assert!(after.contains(&"tokio-rs-tokio".to_string()));
+}

@@ -14,6 +14,9 @@ use http_body_util::BodyExt;
 use donarium::config::Config;
 use donarium::demo;
 use donarium::metrics::Metrics;
+use donarium::scan::fetch::GitlabFetcher;
+use donarium::scan::registry::RegistryClient;
+use donarium::scan::run::Scanner;
 use donarium::store::Store;
 use donarium::web::auth::{AuthMode, SESSION_COOKIE, Session};
 use donarium::web::{AppState, ops_router, router};
@@ -27,12 +30,23 @@ pub struct Harness {
     pub app: Router,
     pub ops: Router,
     pub store: Arc<Store>,
+    pub scanner: Arc<Scanner>,
     pub key: Key,
 }
 
 /// The app with the demo projects. With `dev_auth` every visitor is logged in
 /// as an admin; without it, OIDC is configured and visitors must log in.
 pub async fn harness(dev_auth: bool) -> Harness {
+    harness_with(dev_auth, None).await
+}
+
+/// Like [`harness`] with dev auth, but scans read GitLab from `gitlab` and
+/// image labels from `registry` (base URLs of mock servers).
+pub async fn harness_scanning(gitlab: &str, registry: &str) -> Harness {
+    harness_with(true, Some((gitlab.to_string(), registry.to_string()))).await
+}
+
+async fn harness_with(dev_auth: bool, mocks: Option<(String, String)>) -> Harness {
     let mut args = vec!["donarium"];
     if dev_auth {
         args.push("--insecure-dev-auth");
@@ -51,11 +65,23 @@ pub async fn harness(dev_auth: bool) -> Harness {
     let metrics = Metrics::new();
     let auth = AuthMode::from_config(&cfg.auth, &cfg.public_url, false).unwrap();
     let key = Key::generate();
-    let state = AppState::new(cfg, store.clone(), auth, key.clone()).with_fixed_now(now);
+    // Without mocks there is no GitLab fetcher: scans report that they are
+    // not available.
+    let scanner = Arc::new(match mocks {
+        Some((gitlab, registry)) => Scanner::new(
+            store.clone(),
+            Some(GitlabFetcher::new(gitlab.parse().unwrap(), None).unwrap()),
+            RegistryClient::for_tests(&registry),
+        ),
+        None => Scanner::new(store.clone(), None, RegistryClient::new(vec![]).unwrap()),
+    });
+    let state =
+        AppState::new(cfg, store.clone(), scanner.clone(), auth, key.clone()).with_fixed_now(now);
     Harness {
         app: router(state),
         ops: ops_router(store.clone(), metrics),
         store,
+        scanner,
         key,
     }
 }
@@ -85,4 +111,25 @@ pub fn session_cookie(key: &Key, session: &Session) -> String {
 
 pub async fn body(res: axum::response::Response) -> String {
     String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap()
+}
+
+/// A `.tar.gz` like GitLab's archive endpoint serves: files under one folder.
+pub fn archive(files: &[(&str, &str)]) -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    for (name, data) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(
+                &mut header,
+                format!("repo-main-abc/{name}"),
+                data.as_bytes(),
+            )
+            .unwrap();
+    }
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut gz, &builder.into_inner().unwrap()).unwrap();
+    gz.finish().unwrap()
 }

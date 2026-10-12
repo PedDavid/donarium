@@ -44,7 +44,10 @@
           <td>{{ row.weight }}</td>
           <td class="hidden sm:table-cell text-muted-foreground">{{ row.scan_method }}</td>
           <td>{% if row.enabled %}<span class="badge">enabled</span>{% else %}<span class="badge" data-variant="secondary">disabled</span>{% endif %}</td>
-          <td class="hidden md:table-cell text-muted-foreground">{{ row.last_scan }}</td>
+          <td class="hidden md:table-cell text-muted-foreground">
+            {{ row.last_scan }}
+            {% if let Some(false) = row.last_scan_ok %}<span class="badge" data-variant="destructive">failed</span>{% endif %}
+          </td>
           <td class="hidden lg:table-cell text-muted-foreground" title="{{ row.updated_date }}">{{ row.updated }} by {{ row.updated_by }}</td>
         </tr>
         {% endfor %}
@@ -87,7 +90,7 @@
         <select id="scan_method" class="select" name="scan_method">
           {% for m in methods %}<option value="{{ m.value }}" {% if m.selected %}selected{% endif %}>{{ m.value }}</option>{% endfor %}
         </select>
-        <p><code>auto</code> uses the best method the provider offers.</p>
+        <p><code>auto</code> runs every scan that is available for the provider. Today that is <code>images</code>, on GitLab.</p>
       </div>
     </section>
     <footer>

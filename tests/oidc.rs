@@ -26,6 +26,8 @@ use wiremock::matchers::path;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use donarium::config::Config;
+use donarium::scan::registry::RegistryClient;
+use donarium::scan::run::Scanner;
 use donarium::store::Store;
 use donarium::web::auth::{AuthMode, SESSION_COOKIE, Session};
 use donarium::web::{AppState, router};
@@ -115,7 +117,12 @@ async fn app(idp: &Idp, key: &Key) -> Router {
     .unwrap();
     let store = Arc::new(Store::memory().await.unwrap());
     let auth = AuthMode::from_config(&cfg.auth, &cfg.public_url, false).unwrap();
-    router(AppState::new(cfg, store, auth, key.clone()))
+    let scanner = Arc::new(Scanner::new(
+        store.clone(),
+        None,
+        RegistryClient::new(vec![]).unwrap(),
+    ));
+    router(AppState::new(cfg, store, scanner, auth, key.clone()))
 }
 
 fn set_cookie(res: &axum::response::Response, name: &str) -> String {

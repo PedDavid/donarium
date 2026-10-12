@@ -77,18 +77,26 @@ detail page:
 - notes.
 
 ```sql
-source(id, provider, repo, weight, scan_method, enabled,
-       last_scan_at, last_scan_status, created_by, created_at, updated_by, updated_at)
-project(id, name /* URL slug */, repo UNIQUE, first_seen_at, last_seen_at)  -- discovered
-usage(source_id, project_id, kind /* direct | transitive */)               -- scan output
+source(id, provider, repo, weight, scan_method, enabled, last_scan_at, last_scan_ok,
+       last_scan_status, created_by, created_at, updated_by, updated_at)
+project(id, name /* URL slug */, repo UNIQUE, origin /* discovered | manual */,
+        first_seen_at, last_seen_at)
+usage(source_id, project_id, via /* images | dependencies */,
+      kind /* direct | transitive */)                                     -- scan output
+source_image(source_id, registry, repository, tag, digest, file, origin)  -- what a scan found
+source_skipped(source_id, file, value, reason)
+image_resolution(registry, repository, upstream, label, error, retry, resolved_at) -- registry cache
+image_mapping(registry, repository, project_repo, created_by, created_at) -- admin decisions
 project_funding(project_id, platform, handle, url, origin /* discovered | manual */)
 project_override(project_id, usage_weight, ignore, notes, updated_by, updated_at)
 project_alias(alias_repo, project_id)
 ```
 
 `source`, `project`, `usage` and `project_funding` exist since milestone 2
-(`migrations/0001_init.sql`); the override and alias tables arrive with the
-project detail view. A project's usage score is the sum over enabled sources of
+(`migrations/0001_init.sql`), the image-scan tables since `0002`; the override
+and alias tables arrive with the project detail view. A project's `usage` can
+come from several scans (`via`); when more than one found it in the same source,
+the stronger kind counts once. A project's usage score is the sum over enabled sources of
 the source's weight, in full for a `direct` usage and times 0.25 for a
 `transitive` one.
 
@@ -134,10 +142,12 @@ For each `Source`:
 
 ### 4.2 Image scans
 
-1. **Fetch the repository as one archive** (GitHub and GitLab tarball, Gitea /
-   Forgejo `archive` endpoint) and read the YAML files from it in memory.
-   Nothing is written to disk and nothing is extracted, so archive paths cannot
-   escape anywhere. File count and size are capped.
+1. **Fetch the repository as one archive** (GitLab `archive.tar.gz` today;
+   GitHub and Gitea/Forgejo are next) and read the YAML files from it in
+   memory. Nothing is written to disk and nothing is extracted, so archive paths
+   cannot escape anywhere. Download size, expanded size, file size and file
+   count are capped, and redirects are not followed, so the token only ever goes
+   to its own host.
 2. **Extract image references** (`src/scan/`):
    - Docker Compose files, recognised by their content (`services:` and no
      `apiVersion`), not by file name. `${VAR:-default}` uses the default; a
@@ -150,23 +160,43 @@ For each `Source`:
      `values*.yaml` files.
    - ConfigMaps, Secrets and CRDs are ignored. Helm charts are not rendered, so
      an image a chart chooses itself is not seen.
-3. **Resolve an image to an upstream project:**
-   - `ghcr.io/owner/name` maps to `github.com/owner/name`, and
-     `registry.gitlab.com/group/name` to `gitlab.com/group/name`.
-   - Other registries (Docker Hub, Quay, `lscr.io`, …): the image's
-     `org.opencontainers.image.source` label, read anonymously from the
-     registry, and cached per repository.
-   - **Packager images** (e.g. `linuxserver/sonarr`) resolve to the packaging
-     repository, as their label says. An admin can remap an image to the
-     application's own repository. Mappings are stored and win over the label.
-   - Images that cannot be resolved are listed on the source's page, with the
-     file they came from, so an admin can map them by hand.
+3. **Resolve an image to an upstream project**, first match wins:
+   1. **An admin's mapping** for the image.
+   2. **The image's own label**: `org.opencontainers.image.source` (or the older
+      `org.label-schema.vcs-url`), read anonymously from the registry through the
+      standard token flow, from the image config or the manifest annotations, and
+      cached per repository (a month when found, a day otherwise).
+   3. **A guess from the name**: `ghcr.io/owner/name` is
+      `github.com/owner/name`, `registry.gitlab.com/group/name` is
+      `gitlab.com/group/name`, and linuxserver.io images are
+      `github.com/linuxserver/docker-<app>`. Shown as a guess.
+   - **Packager images** resolve to the packaging repository, as their labels
+     say: `linuxserver/*` and, as the live checks show, Jellyfin
+     (`jellyfin/jellyfin-packaging`). An admin can remap them to the
+     application's own repository. A curated table of such corrections could be
+     added later; it is deliberately not part of the first version.
+   - **Only known registries are contacted** (Docker Hub, ghcr.io, lscr.io,
+     quay.io, registry.gitlab.com, gcr.io, registry.k8s.io, mcr.microsoft.com,
+     public.ecr.aws, docker.elastic.co, codeberg.org, plus `--registry-allow`),
+     because registry hosts come from repository files and must not steer the
+     server towards internal addresses. Token endpoints must be public https
+     hosts, and responses are size limited.
+   - **Rate limits.** Anonymous Docker Hub allows about 100 manifest pulls per six
+     hours per address, and each lookup of a multi-architecture image takes two.
+     On a 429 the rest of that registry's images are left for the next scan
+     instead of being recorded as failures. Later scans are cheap, because
+     answers are cached. Authenticated pulls (a Docker Hub token) would raise the
+     limit and are not implemented.
+   - Images that cannot be resolved are listed on the source's page with the
+     reason and the file they came from, so an admin can map them by hand.
 4. **Write usage:** one `direct` usage per resolved project (an image you run is
    a direct use), weighted by the source's weight like any other.
 
-Scans run on a schedule (default daily, `--scan-interval`), on demand from the
-UI, and after a `Source` changes. Requests go through a rate-limit-aware client
-with ETag caching.
+Scans run on a schedule (default daily, `--scan-interval`, `0s` turns it off)
+and on demand from the source's page ("Scan now", in the background). Two scans
+of one source never overlap. A failed scan keeps what the previous one found and
+marks the source as failed; the metrics `donarium_source_last_scan_ok` and
+`donarium_source_last_scan_timestamp_seconds` let Prometheus alert on that.
 
 **Forges and credentials.** GitHub and GitLab have fixed hosts. A self-hosted
 **Gitea or Forgejo** has no fixed host, so its base URL comes from the server
@@ -340,9 +370,13 @@ without receipts, and an optional "no donation in N days" reminder.
 3. **Scanner.** Image scans first:
    - 3a (done): image reference parsing and extraction from Compose, Kubernetes
      and Flux files, tested on realistic fixtures.
-   - 3b: fetching archives (GitLab, Gitea/Forgejo, GitHub), image → project
-     resolution and mappings, writing usage, the `gitea` provider, and the
-     UI for skipped and unresolved images.
+   - 3b-1 (done): the GitLab path: archive fetch with limits, label lookup,
+     resolution and mappings, usage, scheduler and "Scan now", and the source
+     page for images, skipped references and mappings. Tested against mocked
+     GitLab and registries, plus `tests/live.rs` (`--ignored`) against the real
+     ones.
+   - 3b-2: the same for Gitea/Forgejo (`gitea` provider, host from
+     `--gitea-url`, token) and GitHub.
    - 3c: dependency scans: GitHub dependency-graph/SBOM, deps.dev resolution,
      aggregation.
    `wiremock` tests with recorded fixtures.

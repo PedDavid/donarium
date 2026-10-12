@@ -9,6 +9,9 @@ use tracing_subscriber::EnvFilter;
 use donarium::config::Config;
 use donarium::demo;
 use donarium::metrics::Metrics;
+use donarium::scan::fetch::GitlabFetcher;
+use donarium::scan::registry::RegistryClient;
+use donarium::scan::run::{Scanner, spawn_scheduler};
 use donarium::store::Store;
 use donarium::web::auth::AuthMode;
 use donarium::web::{self, AppState};
@@ -30,13 +33,20 @@ async fn main() -> anyhow::Result<()> {
             .with_context(|| format!("opening {}", cfg.database_url))?
     };
     let store = Arc::new(store);
+    let scanner = Arc::new(build_scanner(&cfg, store.clone())?);
+    if !cfg.demo && cfg.scan_interval.is_positive() {
+        spawn_scheduler(
+            scanner.clone(),
+            std::time::Duration::from_secs(cfg.scan_interval.as_secs() as u64),
+        );
+    }
     let metrics = Metrics::new();
     let demo_dev_auth = cfg.demo && cfg.auth.oidc_issuer.is_none();
     let auth = AuthMode::from_config(&cfg.auth, &cfg.public_url, demo_dev_auth)?;
     let cookie_key = load_cookie_key(&cfg)?;
 
     let ops = web::ops_router(store.clone(), metrics);
-    let state = AppState::new(cfg.clone(), store, auth, cookie_key);
+    let state = AppState::new(cfg.clone(), store, scanner, auth, cookie_key);
     let app = web::router(state);
 
     let ui_listener = tokio::net::TcpListener::bind(cfg.listen).await?;
@@ -47,6 +57,31 @@ async fn main() -> anyhow::Result<()> {
         r = axum::serve(ops_listener, ops).with_graceful_shutdown(shutdown()) => r?,
     }
     Ok(())
+}
+
+/// Demo mode never reaches out: it has no fetcher, so scans report that GitLab
+/// is not configured.
+fn build_scanner(cfg: &Config, store: Arc<Store>) -> anyhow::Result<Scanner> {
+    let gitlab = if cfg.demo {
+        None
+    } else {
+        let token = match &cfg.gitlab_token_file {
+            Some(path) => Some(
+                std::fs::read_to_string(path)
+                    .with_context(|| format!("reading {}", path.display()))?
+                    .trim()
+                    .to_string(),
+            ),
+            None => None,
+        };
+        Some(
+            GitlabFetcher::new(cfg.gitlab_url.clone(), token)
+                .context("building the GitLab client")?,
+        )
+    };
+    let registry =
+        RegistryClient::new(cfg.registry_allow.clone()).context("building the registry client")?;
+    Ok(Scanner::new(store, gitlab, registry))
 }
 
 fn init_tracing(json: bool) {

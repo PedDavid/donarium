@@ -21,10 +21,18 @@ struct SourceLabels {
     state: String,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct ScanLabels {
+    provider: String,
+    repo: String,
+}
+
 pub struct Metrics {
     registry: Registry,
     usage: Family<ProjectLabels, Gauge<f64, std::sync::atomic::AtomicU64>>,
     sources: Family<SourceLabels, Gauge>,
+    scan_time: Family<ScanLabels, Gauge>,
+    scan_ok: Family<ScanLabels, Gauge>,
     /// Held from refresh to encode, so a scrape never sees a half-built state.
     scrape: Mutex<()>,
 }
@@ -44,10 +52,24 @@ impl Metrics {
             "Configured sources by state (enabled, disabled)",
             sources.clone(),
         );
+        let scan_time = Family::default();
+        registry.register(
+            "donarium_source_last_scan_timestamp_seconds",
+            "Unix time of the last scan of an enabled source",
+            scan_time.clone(),
+        );
+        let scan_ok = Family::default();
+        registry.register(
+            "donarium_source_last_scan_ok",
+            "1 if the last scan of an enabled source worked, 0 if it failed",
+            scan_ok.clone(),
+        );
         Arc::new(Metrics {
             registry,
             usage,
             sources,
+            scan_time,
+            scan_ok,
             scrape: Mutex::new(()),
         })
     }
@@ -75,6 +97,20 @@ impl Metrics {
                     state: state.into(),
                 })
                 .set(count as i64);
+        }
+        self.scan_time.clear();
+        self.scan_ok.clear();
+        for s in sources.iter().filter(|s| s.enabled) {
+            let labels = ScanLabels {
+                provider: s.provider.as_str().into(),
+                repo: s.repo.clone(),
+            };
+            if let Some(at) = s.last_scan_at {
+                self.scan_time.get_or_create(&labels).set(at.as_second());
+            }
+            if let Some(ok) = s.last_scan_ok {
+                self.scan_ok.get_or_create(&labels).set(i64::from(ok));
+            }
         }
         let mut out = String::new();
         prometheus_client::encoding::text::encode(&mut out, &self.registry)

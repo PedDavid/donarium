@@ -9,8 +9,9 @@ It never moves money: you donate on the project's own page, then record it.
 
 > **Status:** early. The web shell, OIDC login, metrics, Helm chart and the
 > SQLite database are in place, and admins can manage **sources** (the
-> repositories to scan) in the UI. Scanning, ranking, donations and receipts
-> are next. See [docs/PLAN.md](docs/PLAN.md) for the full design and
+> repositories to scan) in the UI. GitLab sources can be scanned for the
+> container images in their Docker Compose and Kubernetes (Flux) files.
+> Dependency scans, ranking, donations and receipts are next. See [docs/PLAN.md](docs/PLAN.md) for the full design and
 > milestones.
 
 ## Try it
@@ -31,6 +32,31 @@ CRDs and the app needs no Kubernetes API access.
 
 Back the volume up: donations (and your sources) can't be rebuilt, only scan
 results can. The chart keeps the claim when the release is uninstalled.
+
+## Scanning
+
+A source with the scan method `images` (or `auto`) is scanned for the container
+images it runs:
+
+- **Files read:** Docker Compose files, Kubernetes manifests, Flux `HelmRelease`
+  values, Kustomization `images:` and Helm `values*.yaml`. Helm charts are not
+  rendered.
+- **Which project an image belongs to:** an admin's mapping, then the image's own
+  `org.opencontainers.image.source` label (read anonymously from its registry),
+  then a guess from the image name. Images without a project are listed on the
+  source's page, where an admin can map them. Packager images (linuxserver,
+  Jellyfin) point to their packaging repository until remapped.
+- **GitLab only so far.** GitHub and Gitea/Forgejo sources are next.
+  `--gitlab-url` (default `https://gitlab.com`) and `--gitlab-token-file` (for
+  private repositories) configure it. The token is only sent to that host.
+- **Schedule:** `--scan-interval` (default `24h`, `0s` for never) and "Scan now"
+  on the source's page.
+- **Registries:** only well-known public ones are contacted
+  (`--registry-allow` adds more), anonymously. Docker Hub limits anonymous pulls,
+  so the first scan of many images may leave some for the next one.
+
+`cargo test --test live -- --ignored --nocapture` checks the registry and GitLab
+code against the real services.
 
 ## Development
 

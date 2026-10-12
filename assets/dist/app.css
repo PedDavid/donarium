@@ -225,6 +225,17 @@
   .pointer-events-none {
     pointer-events: none;
   }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border-width: 0;
+  }
   .absolute {
     position: absolute;
   }
@@ -246,6 +257,24 @@
   .z-40 {
     z-index: 40;
   }
+  .container {
+    width: 100%;
+    @media (width >= 40rem) {
+      max-width: 40rem;
+    }
+    @media (width >= 48rem) {
+      max-width: 48rem;
+    }
+    @media (width >= 64rem) {
+      max-width: 64rem;
+    }
+    @media (width >= 80rem) {
+      max-width: 80rem;
+    }
+    @media (width >= 96rem) {
+      max-width: 96rem;
+    }
+  }
   .mx-auto {
     margin-inline: auto;
   }
@@ -254,6 +283,9 @@
   }
   .ms-auto {
     margin-inline-start: auto;
+  }
+  .mt-1 {
+    margin-top: var(--spacing);
   }
   .mt-3 {
     margin-top: calc(var(--spacing) * 3);
@@ -409,6 +441,10 @@
     font-size: var(--text-2xl);
     line-height: var(--tw-leading, var(--text-2xl--line-height));
   }
+  .text-lg {
+    font-size: var(--text-lg);
+    line-height: var(--tw-leading, var(--text-lg--line-height));
+  }
   .text-sm {
     font-size: var(--text-sm);
     line-height: var(--tw-leading, var(--text-sm--line-height));
@@ -428,6 +464,9 @@
   .tracking-tight {
     --tw-tracking: var(--tracking-tight);
     letter-spacing: var(--tracking-tight);
+  }
+  .break-all {
+    word-break: break-all;
   }
   .text-foreground {
     color: var(--color-foreground);

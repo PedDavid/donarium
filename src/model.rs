@@ -76,16 +76,19 @@ impl Provider {
 /// How a source's dependencies are collected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScanMethod {
-    /// The best method the provider offers.
+    /// Everything that is implemented for the provider.
     Auto,
+    /// The container images in Compose and Kubernetes (Flux) files.
+    Images,
     DependencyGraph,
     Sbom,
     Lockfiles,
 }
 
 impl ScanMethod {
-    pub const ALL: [ScanMethod; 4] = [
+    pub const ALL: [ScanMethod; 5] = [
         ScanMethod::Auto,
+        ScanMethod::Images,
         ScanMethod::DependencyGraph,
         ScanMethod::Sbom,
         ScanMethod::Lockfiles,
@@ -94,6 +97,7 @@ impl ScanMethod {
     pub fn as_str(self) -> &'static str {
         match self {
             ScanMethod::Auto => "auto",
+            ScanMethod::Images => "images",
             ScanMethod::DependencyGraph => "dependency-graph",
             ScanMethod::Sbom => "sbom",
             ScanMethod::Lockfiles => "lockfiles",
@@ -117,6 +121,8 @@ pub struct Source {
     pub scan_method: ScanMethod,
     pub enabled: bool,
     pub last_scan_at: Option<Timestamp>,
+    /// Whether the last scan worked; `None` before the first one.
+    pub last_scan_ok: Option<bool>,
     pub last_scan_status: Option<String>,
     pub created_by: Actor,
     pub created_at: Timestamp,

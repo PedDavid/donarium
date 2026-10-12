@@ -10,6 +10,13 @@
   </div>
   {% endif %}
 
+  {% if !error.is_empty() %}
+  <div class="alert" data-variant="destructive" role="alert">
+    {% include "icons/triangle-alert.svg" %}
+    <h2>{{ error }}</h2>
+  </div>
+  {% endif %}
+
   <div class="flex flex-wrap items-start justify-between gap-4">
     <div>
       <h1 class="text-2xl font-semibold tracking-tight">{{ source.repo }}</h1>
@@ -25,7 +32,11 @@
     <section>
       <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 text-sm">
         <dt class="text-muted-foreground">Last scan</dt>
-        <dd>{{ source.last_scan }}{% if !source.last_scan_status.is_empty() %} · {{ source.last_scan_status }}{% endif %}</dd>
+        <dd>
+          {{ source.last_scan }}
+          {% if let Some(false) = source.last_scan_ok %}<span class="badge" data-variant="destructive">failed</span>{% endif %}
+          {% if !source.last_scan_status.is_empty() %}<div class="text-muted-foreground">{{ source.last_scan_status }}</div>{% endif %}
+        </dd>
         <dt class="text-muted-foreground">Added</dt>
         <dd>{{ source.created_date }} by {{ source.created_by }}</dd>
         <dt class="text-muted-foreground">Last changed</dt>
@@ -34,6 +45,106 @@
     </section>
   </div>
 
+
+  {% if layout.admin %}
+  <div class="card w-full sm:max-w-xl">
+    <header>
+      <h2>Scan</h2>
+      <p>Reads this repository's Compose and Kubernetes (Flux) files to find the container images it runs, and the projects they come from.</p>
+    </header>
+    <section>
+      {% if scanning %}
+      <p class="text-sm text-muted-foreground">A scan is running. Reload in a moment.</p>
+      {% else if !scan_problem.is_empty() %}
+      <p class="text-sm text-muted-foreground">{{ scan_problem }}</p>
+      {% else if !source.enabled %}
+      <p class="text-sm text-muted-foreground">Enable the source to scan it.</p>
+      {% else %}
+      <form method="post" action="/sources/{{ source.id }}/scan">
+        <input type="hidden" name="_csrf" value="{{ layout.csrf }}">
+        <button type="submit" class="btn" data-variant="outline">{% include "icons/rotate-cw.svg" %} Scan now</button>
+      </form>
+      {% endif %}
+    </section>
+  </div>
+  {% endif %}
+
+  {% if !images.is_empty() %}
+  <div class="flex flex-col gap-3">
+    <div>
+      <h2 class="text-lg font-semibold tracking-tight">Images</h2>
+      <p class="text-muted-foreground text-sm">Container images found in this repository, and the project each one counts towards. The project comes from the image's own source label; where a registry gives none it is guessed from the image's name, or missing. {% if layout.admin %}Set the project yourself where it is wrong.{% endif %}</p>
+    </div>
+    <div class="table-container rounded-lg border">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Image</th>
+            <th class="hidden md:table-cell">Found in</th>
+            <th>Project</th>
+            {% if layout.admin %}<th><span class="sr-only">Map to a project</span></th>{% endif %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in images %}
+          <tr>
+            <td>
+              <div class="font-medium break-all">{{ row.registry }}/{{ row.repository }}</div>
+              {% if !row.tags.is_empty() %}<div class="text-xs text-muted-foreground">{{ row.tags }}</div>{% endif %}
+            </td>
+            <td class="hidden md:table-cell text-muted-foreground">
+              <div class="break-all">{{ row.file }}</div>
+              {% if row.uses > 1 %}<div class="text-xs">and {{ row.uses - 1 }} more</div>{% endif %}
+            </td>
+            <td>
+              {% if row.project.is_empty() %}
+              <span class="badge" data-variant="destructive">no project</span>
+              {% else %}
+              <div class="break-all">{{ row.project }}</div>
+              <div class="text-xs text-muted-foreground">{{ row.how }}</div>
+              {% endif %}
+              {% if !row.note.is_empty() %}<div class="text-xs text-muted-foreground">{{ row.note }}</div>{% endif %}
+            </td>
+            {% if layout.admin %}
+            <td>
+              <form method="post" action="/image-mappings" class="flex items-center gap-2" autocomplete="off">
+                <input type="hidden" name="_csrf" value="{{ layout.csrf }}">
+                <input type="hidden" name="source_id" value="{{ source.id }}">
+                <input type="hidden" name="registry" value="{{ row.registry }}">
+                <input type="hidden" name="repository" value="{{ row.repository }}">
+                <input type="text" class="input" name="project_repo" placeholder="github.com/owner/name" value="{{ row.project }}" aria-label="Project for {{ row.repository }}" required spellcheck="false">
+                <button type="submit" class="btn" data-variant="outline" data-size="sm">Map</button>
+              </form>
+              {% if row.mapped %}
+              <form method="post" action="/image-mappings/delete" class="mt-1">
+                <input type="hidden" name="_csrf" value="{{ layout.csrf }}">
+                <input type="hidden" name="source_id" value="{{ source.id }}">
+                <input type="hidden" name="registry" value="{{ row.registry }}">
+                <input type="hidden" name="repository" value="{{ row.repository }}">
+                <button type="submit" class="btn" data-variant="ghost" data-size="sm">Remove mapping</button>
+              </form>
+              {% endif %}
+            </td>
+            {% endif %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if !skipped.is_empty() %}
+  <details class="w-full rounded-lg border p-4">
+    <summary class="cursor-pointer text-sm font-medium">{{ skipped.len() }} image reference(s) skipped</summary>
+    <ul class="mt-3 flex flex-col gap-2 text-sm">
+      {% for s in skipped %}
+      <li><code class="break-all">{{ s.value }}</code> <span class="text-muted-foreground">in {{ s.file }}: {{ s.reason }}</span></li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+
   {% if layout.admin %}
   <form method="post" action="/sources/{{ source.id }}" class="card w-full sm:max-w-xl" autocomplete="off">
     <input type="hidden" name="_csrf" value="{{ layout.csrf }}">
@@ -41,12 +152,6 @@
       <h2>Settings</h2>
     </header>
     <section class="flex flex-col gap-4">
-      {% if !error.is_empty() %}
-      <div class="alert" data-variant="destructive" role="alert">
-        {% include "icons/triangle-alert.svg" %}
-        <h2>{{ error }}</h2>
-      </div>
-      {% endif %}
       <div class="field">
         <label for="weight">Weight</label>
         <input id="weight" type="text" inputmode="decimal" name="weight" value="{{ form.weight }}" required>
