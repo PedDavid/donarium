@@ -7,28 +7,29 @@ donation to its receipt. Receipts are referenced where they already exist
 (Paperless-ngx) or stored in S3. Donarium never moves money: you donate on the
 project's own page, then record it.
 
-It is built like [donarium](https://github.com/PedDavid/donarium): one Rust
+It is built like [clavium](https://github.com/PedDavid/clavium): one Rust
 binary, axum + askama + htmx + Basecoat UI, OIDC login, Prometheus metrics, a
-Helm chart and a CRD group under `prdv.cloud`.
+Helm chart. Unlike clavium it has no CRDs: everything it knows lives in a
+database, and it needs no access to the Kubernetes API.
 
 ## 1. Decisions
 
 | Topic | Decision |
 |---|---|
 | Scope | Tracking, ranking and receipts. No payments are made by the app |
-| Platform | Kubernetes only. CRD group `donarium.prdv.cloud` |
-| Inventory (git) | `Project` and `Source` CRs (see section 3), applied by GitOps like donarium's `ApiKey` |
-| Donations | SQLite on a PVC by default, Postgres optional (`--database-url`). Append-only, because the app creates them and they don't belong in git or etcd |
+| Platform | Kubernetes (Helm chart). The app itself needs no Kubernetes API access, so no RBAC and no CRDs |
+| Storage | One database: SQLite on a PVC by default, Postgres optional (`--database-url`). It holds sources, discovered projects, overrides, scan results, donations and receipt references |
+| Sources and overrides | Entered by admins in the UI and stored in the database. CRDs and a GitOps layer are a possible later addition, not part of the first versions |
 | Usage data | Scanned from your own repos' dependencies, stored in the database, recomputed on a schedule |
 | Receipts | Pluggable `ReceiptStore`: **reference** a Paperless-ngx document (default flow), or **upload** to an S3-compatible bucket |
-| Auth | OIDC, as in donarium. Everyone who logs in can view; admins (group claim) can record donations and edit weights |
+| Auth | OIDC, as in clavium. Everyone who logs in can view; admins (group claim) can record donations and edit weights |
 | Language / UI | Rust; askama + Tailwind + Basecoat + htmx; single binary |
 | Alerting | Metrics only (reminders such as "no donation in 90 days"). No notifier of its own |
 
 ## 2. Architecture
 
 ```
- git (Project/Source YAML) ──Argo/Flux──▶ CRs ──watch──┐
+ admins (UI) ──sources, overrides, donations──┐
                                                        ▼
  GitHub / GitLab ◀──dependency graph, SBOM, lockfiles── donarium ──▶ deps.dev / ecosyste.ms
                                                        │  │  (package → upstream repo, funding links)
@@ -40,42 +41,54 @@ Helm chart and a CRD group under `prdv.cloud`.
 
 - **One replica**, with a scheduler task for scans. SQLite on a `ReadWriteOnce`
   PVC forces `replicas: 1`; Postgres lifts that, but nothing needs it yet.
-- **Why hybrid:** what you *watch* (which repos to scan, which projects to
-  pin or ignore) is declarative and reviewable, so it lives in git. What you
-  *did* (donations, scan results) is event data the app writes, so it lives in
-  the database. Donarium's "no database" rule doesn't fit append-only records
-  with attachments.
+- **Why a database and not CRDs:** donations are append-only events the app
+  creates, and sources and overrides are small, rarely changed settings tied to
+  rows the scan discovers (you decide to ignore a project while looking at the
+  ranking). Keeping all of it in one store means one thing to back up and no
+  split between git and the database. Clavium's "no database" approach doesn't
+  fit append-only records with attachments.
 - Backups: the Helm chart documents a `VolumeSnapshot` / `litestream` option.
-  Donations are the one thing here that can't be rebuilt, because scan results
-  can be re-created and CRs are in git.
+  Donations, sources and overrides can't be rebuilt, only scan results can, so
+  the database is the one thing to back up.
 
-## 3. Resources (git)
+## 3. Data model
 
-```yaml
-apiVersion: donarium.prdv.cloud/v1alpha1
-kind: Source                    # a place to scan for dependencies
-metadata: { name: infra, namespace: donarium }
-spec:
-  provider: github              # github | gitlab
-  repo: PedDavid/infra
-  weight: 1.0                   # how much this repo counts (prod service > toy)
-  scan: [dependency-graph]      # dependency-graph | sbom | lockfiles
----
-apiVersion: donarium.prdv.cloud/v1alpha1
-kind: Project                   # optional overrides for an upstream project
-metadata: { name: tokio-rs-tokio, namespace: donarium }
-spec:
-  repo: github.com/tokio-rs/tokio   # canonical identity
-  usageWeight: 2.0              # manual multiplier on the scanned usage
-  ignore: false                 # e.g. company-backed projects you won't fund
-  funding:                      # extra channels, merged with discovered ones
-    - { platform: opencollective, handle: tokio }
-  notes: Used by most of my Rust services.
+Everything below is stored in the database and changed through the UI. Only
+admins can write; everyone who logs in can read.
+
+**Sources** are the repositories you want scanned. An admin adds one with a
+provider (`github` or `gitlab`), the repository (`owner/name`) and a weight
+(how much that repo counts: a production service 1.0, a toy 0.2). The scan
+method (`dependency-graph`, `sbom` or `lockfiles`) defaults to the best one
+available. A source can be disabled without deleting it, and "Scan now" runs
+it on demand.
+
+**Projects** are **never created by hand**. Scanning the sources discovers the
+upstream projects they depend on, and each gets a row identified by its
+canonical repository (e.g. `github.com/tokio-rs/tokio`).
+
+**Overrides** are optional per-project settings, edited on the project's
+detail page:
+
+- `usage_weight`: manual multiplier on the scanned usage.
+- `ignore`: e.g. a company-backed project you won't fund.
+- extra funding channels, merged with the discovered ones.
+- `aliases`: correct a wrong package → repository mapping.
+- notes.
+
+```sql
+source(id, provider, repo, weight, scan_method, enabled,
+       last_scan_at, last_scan_status, created_by, created_at)
+project(id, repo UNIQUE, name, first_seen_at, last_seen_at)       -- discovered
+project_override(project_id, usage_weight, ignore, notes, updated_by, updated_at)
+project_funding(project_id, platform, handle, url, origin /* discovered | manual */)
+project_alias(alias_repo, project_id)
+usage(source_id, project_id, direct_count, transitive_count)       -- scan output
 ```
 
-Projects are **discovered** by scans and exist in the database without a CR.
-A `Project` CR only adds overrides. Status (last scan, validation) goes in
-`.status` as in donarium, with the `status` subresource and a generated CRD.
+Changes to sources and overrides are recorded with who made them and when,
+like donations. If CRDs are added later (for example a `Source` resource applied
+by GitOps), they would write into these same tables.
 
 ## 4. Usage scanning
 
@@ -107,8 +120,8 @@ and requests go through a rate-limit-aware client with ETag caching.
 
 Known limits to state in the README: the dependency graph only sees what's
 committed, so unpinned or vendored dependencies are missed. Monorepo packages
-count as one upstream project. Package → repo mapping can be wrong; the
-`Project` CR can correct it through `aliases`.
+count as one upstream project. Package → repo mapping can be wrong; an
+override can correct it through an alias.
 
 ## 5. Ranking
 
@@ -143,7 +156,7 @@ The **detail view** shows the full picture behind the number:
 Recording flow (admin only):
 
 1. From a project's page, **Donate** opens its funding link (same pattern as
-   donarium's on-demand "Create" link: the click is recorded, then it redirects).
+   clavium's on-demand "Create" link: the click is recorded, then it redirects).
 2. **Record donation**: project, platform, amount, currency, date, recurring or
    one-off, optional note, and the receipt (section 7).
 3. Rows are append-only. Corrections are a new `void` row that references the
@@ -247,24 +260,26 @@ without receipts, and an optional "no donation in N days" reminder.
 
 - OIDC with PKCE, encrypted cookie sessions, CSRF and same-origin checks, strict
   CSP and `no-store` responses, optional step-up for recording: all copied
-  from donarium's `web::auth`.
+  from clavium's `web::auth`.
 - Secrets (GitHub token, Paperless token, S3 credentials) come from mounted
   files, held in `SecretString`, and never logged.
-- Provider and Paperless/S3 hosts are fixed by config, never taken from a CR,
-  so a spec cannot redirect a credential.
+- Provider and Paperless/S3 hosts are fixed by config, never taken from
+  user-entered data, so a source or override cannot redirect a credential.
+  Source repositories are validated as `owner/name` against the fixed provider host.
 - Uploads are size-limited and type-checked, and are never rendered inline.
 
 ## 10. Milestones
 
-1. **Skeleton.** Copy donarium's scaffolding: config, CLI, tracing, OIDC/auth,
+1. **Skeleton.** Copy clavium's scaffolding: config, CLI, tracing, OIDC/auth,
    axum + askama + Basecoat shell, `--demo` mode, Helm chart, CI (fmt, clippy,
-   tests, CRD up-to-date check, chart release), Dockerfile.
-2. **Projects and sources.** `Source`/`Project` CRDs with a generated CRD and
-   status, reflector cache, SQLite schema and migrations (`sqlx`).
+   tests, chart release), Dockerfile.
+2. **Storage.** SQLite schema and migrations (`sqlx`), a `Repository` backed by
+   it, the PVC in the Helm chart, and the UI to add, edit, disable and delete
+   sources (admin only, with audit fields).
 3. **Scanner.** GitHub dependency-graph/SBOM first, then deps.dev resolution,
    aggregation, and the usage table. `wiremock` tests with recorded fixtures.
 4. **Ranking and views.** List by `priority`, detail view with usage, timeline,
-   fair share and funding; snapshot and screenshot tests as in donarium.
+   fair share and funding; snapshot and screenshot tests as in clavium.
 5. **Donations.** Record, void, totals, recurring entries, `FUNDING.yml`
    discovery, currency conversion (Frankfurter client, rate cache, manual
    override, retry task).
@@ -279,8 +294,10 @@ without receipts, and an optional "no donation in N days" reminder.
 
 ## 11. Open points
 
+- CRDs and GitOps for sources/overrides are deferred. If wanted later, they
+  write into the same tables, so nothing built before then changes.
 - Weights for transitive dependencies (0.25 is a guess) need tuning against
   real data once milestone 3 runs on your repos.
-- Whether to bring in code from donarium as a shared crate (auth, metrics
+- Whether to bring in code from clavium as a shared crate (auth, metrics
   helpers, layout) or copy it. Copying is faster now; a shared crate pays off if
   a third app appears.
