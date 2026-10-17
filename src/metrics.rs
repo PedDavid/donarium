@@ -58,6 +58,7 @@ pub struct Metrics {
     donations: Gauge,
     unconverted: Gauge,
     last_donation: Family<ProjectLabels, Gauge>,
+    priority: Family<ProjectLabels, FloatGauge>,
     /// Exchange rate lookups by result (shared with [`crate::fx::Fx`]).
     pub fx_requests: Family<ResultLabels, Counter>,
     /// Held from refresh to encode, so a scrape never sees a half-built state.
@@ -121,6 +122,12 @@ impl Metrics {
             "Unix time of the last donation to a project (the day, at 00:00 UTC)",
             last_donation.clone(),
         );
+        let priority = Family::default();
+        registry.register(
+            "donarium_project_priority",
+            "Ranking priority (usage share times staleness) of the 20 projects to support next",
+            priority.clone(),
+        );
         let fx_requests = Family::<ResultLabels, Counter>::default();
         for result in FX_RESULTS {
             let _ = fx_requests.get_or_create(&ResultLabels {
@@ -144,6 +151,7 @@ impl Metrics {
             donations,
             unconverted,
             last_donation,
+            priority,
             scrape: Mutex::new(()),
         })
     }
@@ -198,6 +206,15 @@ impl Metrics {
                     })
                     .set(at.as_second());
             }
+        }
+        self.priority.clear();
+        let ranking = crate::ranking::rank(&projects, jiff::Zoned::now().date());
+        for r in ranking.projects.iter().filter(|r| r.can_donate).take(20) {
+            self.priority
+                .get_or_create(&ProjectLabels {
+                    project: r.name.clone(),
+                })
+                .set(r.priority);
         }
         self.scan_time.clear();
         self.scan_ok.clear();
