@@ -57,6 +57,7 @@ pub struct Metrics {
     donated_paid: Family<CurrencyLabels, FloatGauge>,
     donations: Gauge,
     unconverted: Gauge,
+    no_receipt: Gauge,
     last_donation: Family<ProjectLabels, Gauge>,
     /// Exchange rate lookups by result (shared with [`crate::fx::Fx`]).
     pub fx_requests: Family<ResultLabels, Counter>,
@@ -115,6 +116,12 @@ impl Metrics {
             "Donations still waiting for their amount in the base currency",
             unconverted.clone(),
         );
+        let no_receipt = Gauge::default();
+        registry.register(
+            "donarium_donations_without_receipt",
+            "Donations that count and have no receipt linked",
+            no_receipt.clone(),
+        );
         let last_donation = Family::default();
         registry.register(
             "donarium_last_donation_timestamp_seconds",
@@ -143,6 +150,7 @@ impl Metrics {
             donated_paid,
             donations,
             unconverted,
+            no_receipt,
             last_donation,
             scrape: Mutex::new(()),
         })
@@ -190,6 +198,8 @@ impl Metrics {
         }
         self.donations.set(totals.count as i64);
         self.unconverted.set(totals.unconverted as i64);
+        self.no_receipt
+            .set(store.donations_without_receipt().await?);
         for p in &projects {
             if let Some(at) = p.last_donation {
                 self.last_donation

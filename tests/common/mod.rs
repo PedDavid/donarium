@@ -48,6 +48,17 @@ pub async fn harness_args(dev_auth: bool, extra: &[&str]) -> Harness {
     harness_with(dev_auth, None, extra, None).await
 }
 
+/// [`harness`] with receipts found in the mock Paperless at `url`.
+pub async fn harness_paperless(url: &str) -> Harness {
+    harness_with(
+        false,
+        None,
+        &["--paperless-url", url, "--paperless-token-file", "/unused"],
+        None,
+    )
+    .await
+}
+
 /// [`harness`] where exchange rates come from the mock server at `fx_url`.
 pub async fn harness_fx(dev_auth: bool, fx_url: &str) -> Harness {
     harness_with(dev_auth, None, &[], Some(fx_url.to_string())).await
@@ -84,6 +95,7 @@ async fn harness_with(
         ]);
     }
     let cfg = Config::try_parse_from(args).unwrap();
+    let cfg_paperless = cfg.paperless_url.clone();
     let now: jiff::Timestamp = NOW.parse().unwrap();
     let store = Arc::new(Store::memory().await.unwrap());
     demo::seed(&store, now).await.unwrap();
@@ -118,6 +130,13 @@ async fn harness_with(
         key.clone(),
     )
     .with_fixed_now(now);
+    // The token file is never read here: the mock accepts a fixed token.
+    let state = match &cfg_paperless {
+        Some(url) => state.with_paperless(
+            donarium::receipts::Paperless::new(url.clone(), "test-token".into()).unwrap(),
+        ),
+        None => state,
+    };
     Harness {
         app: router(state),
         ops: ops_router(store.clone(), metrics, "EUR".to_string()),
