@@ -13,11 +13,11 @@ use tracing::info;
 
 use super::auth::{Admin, User};
 use super::pages::{Ctx, Feedback, Layout};
-use super::views::{DonationRow, TotalsView};
+use super::views::{DonationRow, PlanRow, TotalsView};
 use super::{AppError, AppState};
 use crate::funding;
 use crate::fx::FxError;
-use crate::model::{Conversion, DonationKind, FxSource, NewDonation};
+use crate::model::{Conversion, DonationKind, Every, FxSource, NewDonation};
 use crate::money;
 use crate::store::StoreError;
 
@@ -36,6 +36,10 @@ fn notice(code: &str) -> &'static str {
             "Donation recorded. Exchange rates are turned off: enter a rate on the donation to include it in the totals."
         }
         "rated" => "Rate saved. The donation now counts in the totals.",
+        "recurring-created" => {
+            "Recurring donation set up. What has already fallen due is recorded."
+        }
+        "recurring-ended" => "Recurring donation ended. What it recorded stays.",
         "voided" => "Donation voided. It stays in the history, marked as voided.",
         _ => "",
     }
@@ -85,6 +89,9 @@ struct DonationsPage {
     projects: Vec<SelectOption>,
     platforms: Vec<SelectOption>,
     kinds: Vec<SelectOption>,
+    plans: Vec<PlanRow>,
+    everys: Vec<SelectOption>,
+    plan: super::recurring::PlanValues,
 }
 
 fn options<T: Into<String>>(
@@ -119,7 +126,7 @@ pub async fn index(
     render(&ctx, &q.project, form, Feedback::ok(notice(&q.notice))).await
 }
 
-fn blank_form(state: &AppState, project: &str) -> FormValues {
+pub(super) fn blank_form(state: &AppState, project: &str) -> FormValues {
     FormValues {
         project: project.to_string(),
         platform: "github-sponsors".into(),
@@ -134,10 +141,22 @@ fn blank_form(state: &AppState, project: &str) -> FormValues {
     }
 }
 
-async fn render(
+pub(super) async fn render(
     ctx: &Ctx<'_>,
     project: &str,
     form: FormValues,
+    feedback: Feedback,
+) -> Result<Response, AppError> {
+    let plan = super::recurring::PlanValues::blank(ctx.state);
+    render_with_plan(ctx, project, form, plan, feedback).await
+}
+
+/// The donations page, with what was typed into either form.
+pub(super) async fn render_with_plan(
+    ctx: &Ctx<'_>,
+    project: &str,
+    form: FormValues,
+    plan: super::recurring::PlanValues,
     feedback: Feedback,
 ) -> Result<Response, AppError> {
     let store = &ctx.state.inner.store;
@@ -178,6 +197,19 @@ async fn render(
             &form.kind,
         ),
         form,
+        plans: store
+            .list_recurring()
+            .await?
+            .iter()
+            .map(PlanRow::new)
+            .collect(),
+        everys: options(
+            Every::ALL
+                .into_iter()
+                .map(|e| (e.as_str(), e.label().to_string())),
+            plan.every.as_str(),
+        ),
+        plan,
     };
     Ok((feedback.status, Html(page.render()?)).into_response())
 }

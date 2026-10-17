@@ -3,7 +3,9 @@
 use jiff::{SignedDuration, Timestamp};
 
 use crate::funding;
-use crate::model::{Donation, ForgeHosts, Funding, FxSource, Origin, Project, Source, Totals};
+use crate::model::{
+    Donation, ForgeHosts, Funding, FxSource, Origin, Project, Recurring, Source, Totals,
+};
 use crate::money::{format_amount, minor_exponent};
 
 pub fn fmt_date(t: Timestamp) -> String {
@@ -111,6 +113,39 @@ pub fn fmt_money(minor: i64, currency: &str) -> String {
 }
 
 /// A donation, ready to show.
+#[derive(Clone, Debug)]
+/// A recurring donation, for the list on the donations page.
+pub struct PlanRow {
+    pub id: i64,
+    pub project: String,
+    pub project_repo: String,
+    pub platform: String,
+    pub amount: String,
+    pub every: &'static str,
+    pub since: String,
+    /// "ended 2026-11-20", if it was.
+    pub ended: String,
+    pub recorded: i64,
+    pub note: String,
+}
+
+impl PlanRow {
+    pub fn new(r: &Recurring) -> PlanRow {
+        PlanRow {
+            id: r.id,
+            project: r.project.clone(),
+            project_repo: r.project_repo.clone(),
+            platform: funding::display_name(&r.platform).to_string(),
+            amount: fmt_money(r.amount_minor, &r.currency),
+            every: r.every.label(),
+            since: r.starts_on.to_string(),
+            ended: r.ends_on.map(|d| format!("ended {d}")).unwrap_or_default(),
+            recorded: r.recorded,
+            note: r.note.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct DonationRow {
     pub id: i64,
