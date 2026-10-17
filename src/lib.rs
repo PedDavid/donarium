@@ -4,6 +4,7 @@ pub mod duration;
 pub mod funding;
 pub mod metrics;
 pub mod model;
+pub mod money;
 pub mod scan;
 pub mod store;
 pub mod validation;

@@ -89,7 +89,7 @@ async fn harness_with(dev_auth: bool, mocks: Option<(String, String)>, extra: &[
         AppState::new(cfg, store.clone(), scanner.clone(), auth, key.clone()).with_fixed_now(now);
     Harness {
         app: router(state),
-        ops: ops_router(store.clone(), metrics),
+        ops: ops_router(store.clone(), metrics, "EUR".to_string()),
         store,
         scanner,
         key,

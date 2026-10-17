@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="flex flex-col gap-6">
+  {% if !notice.is_empty() %}
+  <div class="alert" role="status">
+    {% include "icons/circle-check.svg" %}
+    <h2>{{ notice }}</h2>
+  </div>
+  {% endif %}
+
+  <div>
+    <h1 class="text-2xl font-semibold tracking-tight">Donations{% if !filter.is_empty() %} to {{ filter }}{% endif %}</h1>
+    <p class="text-muted-foreground text-sm">What you have given. Donate on a project's own page first, then record it here. Amounts are kept as paid, and also in {{ base_currency }}, converted once when recorded.{% if !filter.is_empty() %} <a class="underline underline-offset-4" href="/donations">Show all</a>.{% endif %}</p>
+  </div>
+
+  <div class="card w-full sm:max-w-xl">
+    <section>
+      <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 text-sm">
+        <dt class="text-muted-foreground">Total</dt>
+        <dd class="font-medium">{{ totals.base }} <span class="text-muted-foreground font-normal">in {{ totals.count }} donation(s)</span></dd>
+        {% if totals.unconverted > 0 %}
+        <dt class="text-muted-foreground">Pending</dt>
+        <dd>{{ totals.unconverted }} donation(s) are not in this total yet: their amount in {{ base_currency }} is not known.</dd>
+        {% endif %}
+        {% if !totals.by_year.is_empty() %}
+        <dt class="text-muted-foreground">By year</dt>
+        <dd>{% for y in totals.by_year %}{{ y.0 }}: {{ y.1 }}{% if !loop.last %} · {% endif %}{% endfor %}</dd>
+        {% endif %}
+        {% if totals.show_as_paid %}
+        <dt class="text-muted-foreground">As paid</dt>
+        <dd>{% for c in totals.by_currency %}{{ c.1 }}{% if !loop.last %} · {% endif %}{% endfor %}</dd>
+        {% endif %}
+      </dl>
+    </section>
+  </div>
+
+  {% include "partials/donations_table.html" %}
+
+  {% if layout.admin %}
+  <form id="record" method="post" action="/donations" class="card w-full sm:max-w-xl" autocomplete="off">
+    <input type="hidden" name="_csrf" value="{{ layout.csrf }}">
+    <header>
+      <h2>Record a donation</h2>
+    </header>
+    <section class="flex flex-col gap-4">
+      {% if !error.is_empty() %}
+      <div class="alert" data-variant="destructive" role="alert">
+        {% include "icons/triangle-alert.svg" %}
+        <h2>{{ error }}</h2>
+      </div>
+      {% endif %}
+      <div class="field">
+        <label for="project">Project</label>
+        <select id="project" class="select" name="project" required>
+          <option value="">Choose…</option>
+          {% for p in projects %}<option value="{{ p.value }}" {% if p.selected %}selected{% endif %}>{{ p.label }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="platform">Donated through</label>
+        <select id="platform" class="select" name="platform">
+          {% for p in platforms %}<option value="{{ p.value }}" {% if p.selected %}selected{% endif %}>{{ p.label }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="grid grid-cols-2 gap-4">
+        <div class="field">
+          <label for="amount">Amount</label>
+          <input id="amount" type="text" inputmode="decimal" name="amount" value="{{ form.amount }}" placeholder="12.50" required>
+        </div>
+        <div class="field">
+          <label for="currency">Currency</label>
+          <input id="currency" type="text" name="currency" value="{{ form.currency }}" maxlength="3" required spellcheck="false">
+        </div>
+      </div>
+      <div class="grid grid-cols-2 gap-4">
+        <div class="field">
+          <label for="date">Date</label>
+          <input id="date" type="date" name="date" value="{{ form.date }}" required>
+        </div>
+        <div class="field">
+          <label for="kind">Kind</label>
+          <select id="kind" class="select" name="kind">
+            {% for k in kinds %}<option value="{{ k.value }}" {% if k.selected %}selected{% endif %}>{{ k.label }}</option>{% endfor %}
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label for="rate">Rate to {{ base_currency }} <span class="text-muted-foreground">(optional)</span></label>
+        <input id="rate" type="text" inputmode="decimal" name="rate" value="{{ form.rate }}" spellcheck="false">
+        <p>For a currency other than {{ base_currency }}: how many {{ base_currency }} one unit was worth, if you know what you were really charged. Leave empty otherwise.</p>
+      </div>
+      <div class="field">
+        <label for="note">Note <span class="text-muted-foreground">(optional)</span></label>
+        <input id="note" type="text" name="note" value="{{ form.note }}" maxlength="500">
+      </div>
+    </section>
+    <footer>
+      <button type="submit" class="btn">Record</button>
+    </footer>
+  </form>
+  {% endif %}
+</div>
+{% endblock %}

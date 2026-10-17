@@ -13,6 +13,23 @@ pub const PLATFORMS: &[(&str, &str)] = &[
     ("other", "Other (a link)"),
 ];
 
+/// Where a donation can have been made: the platforms above, a direct payment
+/// (bank transfer, PayPal, ...), or something else.
+pub fn donation_platforms() -> Vec<(&'static str, &'static str)> {
+    let mut all: Vec<_> = PLATFORMS
+        .iter()
+        .copied()
+        .filter(|(id, _)| *id != "other")
+        .collect();
+    all.push(("direct", "Direct payment (bank, PayPal, …)"));
+    all.push(("other", "Other"));
+    all
+}
+
+pub fn is_donation_platform(platform: &str) -> bool {
+    donation_platforms().iter().any(|(id, _)| *id == platform)
+}
+
 pub fn is_platform(platform: &str) -> bool {
     PLATFORMS.iter().any(|(id, _)| *id == platform)
 }
@@ -21,7 +38,16 @@ pub fn display_name(platform: &str) -> &str {
     PLATFORMS
         .iter()
         .find(|(id, _)| *id == platform)
-        .map_or(platform, |(_, name)| name)
+        .map_or_else(
+            || {
+                if platform == "direct" {
+                    "Direct payment"
+                } else {
+                    platform
+                }
+            },
+            |(_, name)| name,
+        )
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -135,6 +161,18 @@ mod tests {
             assert!(parse(platform, bad).is_err(), "{platform} {bad:?}");
         }
         assert!(parse("kofi", &"a".repeat(101)).is_err());
+    }
+
+    #[test]
+    fn donation_platforms_include_direct_payments() {
+        let ids: Vec<&str> = donation_platforms().iter().map(|(id, _)| *id).collect();
+        assert!(
+            ids.contains(&"github-sponsors") && ids.contains(&"direct") && ids.contains(&"other")
+        );
+        assert_eq!(ids.iter().filter(|i| **i == "other").count(), 1);
+        assert!(is_donation_platform("direct"));
+        assert!(!is_donation_platform("paypal"));
+        assert_eq!(display_name("direct"), "Direct payment");
     }
 
     #[test]

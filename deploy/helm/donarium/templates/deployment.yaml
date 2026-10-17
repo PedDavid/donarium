@@ -59,6 +59,8 @@ spec:
             - name: DONARIUM_GITHUB_TOKEN_FILE
               value: /etc/donarium/github/{{ .Values.github.tokenSecret.key }}
             {{- end }}
+            - name: DONARIUM_BASE_CURRENCY
+              value: {{ .Values.baseCurrency | quote }}
             - name: DONARIUM_SCAN_INTERVAL
               value: {{ .Values.scanInterval | quote }}
             {{- with .Values.registryAllow }}

@@ -1411,3 +1411,458 @@ async fn readers_see_projects_but_no_forms() {
     assert!(!html.contains("Add a way to donate"));
     assert!(!html.contains("Delete this project"));
 }
+
+// --- donations ---
+
+fn donation_form<'a>(csrf: &'a str, fields: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
+    let mut all = vec![
+        ("_csrf", csrf),
+        ("project", "tokio-rs-axum"),
+        ("platform", "github-sponsors"),
+        ("amount", "12.50"),
+        ("currency", "EUR"),
+        ("date", "2026-09-20"),
+        ("kind", "one_off"),
+        ("note", ""),
+        ("rate", ""),
+    ];
+    for (k, v) in fields {
+        all.retain(|(key, _)| key != k);
+        all.push((k, v));
+    }
+    all
+}
+
+#[tokio::test]
+async fn the_donations_page_lists_donations_and_totals() {
+    let h = harness(false).await;
+    let reader = session_cookie(&h.key, &session(false));
+    let res = h
+        .app
+        .clone()
+        .oneshot(get("/donations", &reader))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = body(res).await;
+    // 25.00 EUR + 5.00 EUR + 9.20 EUR (10 USD at a rate entered by hand).
+    assert!(html.contains("39.20 EUR"), "{html}");
+    assert!(
+        html.contains("in 4 donation(s)"),
+        "all donations that count, including the pending one"
+    );
+    assert!(html.contains("10.00 USD"));
+    assert!(html.contains("≈ 9.20 EUR"));
+    assert!(html.contains("2000 JPY"));
+    assert!(html.contains("conversion pending"));
+    assert!(html.contains("1 donation(s) are not in this total yet"));
+    assert!(html.contains("what the card was charged"));
+    assert!(
+        html.contains("As paid"),
+        "several currencies are shown as paid"
+    );
+    assert!(!html.contains("Record a donation"), "readers get no form");
+    assert!(!html.contains("/void"));
+
+    // One project's donations.
+    let res = h
+        .app
+        .oneshot(get("/donations?project=serde-rs-serde", &reader))
+        .await
+        .unwrap();
+    let html = body(res).await;
+    assert!(html.contains("10.00 USD"));
+    assert!(
+        !html.contains("25.00 EUR"),
+        "other projects are not listed or counted"
+    );
+    assert!(html.contains("9.20 EUR"), "the summary is for this project");
+    assert!(html.contains("in 1 donation(s)"));
+}
+
+#[tokio::test]
+async fn admins_record_a_donation_in_the_base_currency() {
+    let h = harness(false).await;
+    let admin = session_cookie(&h.key, &session(true));
+    let res = h
+        .app
+        .clone()
+        .oneshot(post(
+            "/donations",
+            &admin,
+            &donation_form("csrf-token", &[]),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers()[header::LOCATION],
+        "/donations?notice=recorded&project=tokio-rs-axum"
+    );
+    let d = &h.store.list_donations(Some("tokio-rs-axum")).await.unwrap()[0];
+    assert_eq!(d.amount_minor, 1250);
+    assert_eq!(d.currency, "EUR");
+    assert_eq!(d.donated_on.to_string(), "2026-09-20");
+    let c = d.conversion.unwrap();
+    assert_eq!(
+        (c.base_minor, c.source),
+        (1250, donarium::model::FxSource::Same)
+    );
+    assert_eq!(d.recorded_by.name, "alice");
+
+    let res = h
+        .app
+        .oneshot(get(
+            "/donations?notice=recorded&project=tokio-rs-axum",
+            &admin,
+        ))
+        .await
+        .unwrap();
+    let html = body(res).await;
+    assert!(html.contains("Donation recorded."));
+    assert!(html.contains("12.50 EUR"));
+}
+
+#[tokio::test]
+async fn a_rate_entered_by_hand_converts_exactly() {
+    let h = harness(false).await;
+    let admin = session_cookie(&h.key, &session(true));
+    // 10.00 USD at 0.9255 is exactly 9.255 EUR, which rounds up.
+    let res = h
+        .app
+        .oneshot(post(
+            "/donations",
+            &admin,
+            &donation_form(
+                "csrf-token",
+                &[("amount", "10.00"), ("currency", "usd"), ("rate", "0,9255")],
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let d = &h.store.list_donations(Some("tokio-rs-axum")).await.unwrap()[0];
+    assert_eq!(d.currency, "USD", "the currency is normalised");
+    let c = d.conversion.unwrap();
+    assert_eq!(
+        (c.base_minor, c.source),
+        (926, donarium::model::FxSource::Manual)
+    );
+    assert_eq!(c.rate, 0.9255);
+}
+
+#[tokio::test]
+async fn a_foreign_donation_without_a_rate_is_pending() {
+    let h = harness(false).await;
+    let admin = session_cookie(&h.key, &session(true));
+    let res = h
+        .app
+        .oneshot(post(
+            "/donations",
+            &admin,
+            &donation_form("csrf-token", &[("amount", "1500"), ("currency", "JPY")]),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert!(
+        res.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .contains("notice=pending")
+    );
+    let d = &h.store.list_donations(Some("tokio-rs-axum")).await.unwrap()[0];
+    assert_eq!(
+        (d.amount_minor, d.conversion),
+        (1500, None),
+        "yen have no cents"
+    );
+}
+
+#[tokio::test]
+async fn bad_donations_are_rejected_and_nothing_is_stored() {
+    let h = harness(false).await;
+    let admin = session_cookie(&h.key, &session(true));
+    let before = h.store.list_donations(None).await.unwrap().len();
+    let long_note = "x".repeat(501);
+    for (fields, message) in [
+        (vec![("project", "")], "choose a project"),
+        (vec![("project", "no-such-project")], "choose a project"),
+        (vec![("platform", "paypal")], "where you donated"),
+        (vec![("amount", "")], "enter the amount"),
+        (vec![("amount", "0")], "greater than zero"),
+        (vec![("amount", "-5")], "enter the amount"),
+        (vec![("amount", "1,234.56")], "thousands separators"),
+        (vec![("amount", "12.345")], "2 decimal places"),
+        (
+            vec![("amount", "1.5"), ("currency", "JPY")],
+            "0 decimal places",
+        ),
+        (vec![("currency", "EURO")], "three-letter"),
+        (vec![("date", "yesterday")], "YYYY-MM-DD"),
+        (vec![("date", "2030-01-01")], "in the future"),
+        (vec![("date", "1999-12-31")], "too long ago"),
+        (vec![("kind", "monthly")], "one-off or recurring"),
+        (vec![("note", &long_note)], "too long"),
+        (vec![("rate", "0.9")], "no rate is needed"),
+        (vec![("currency", "USD"), ("rate", "-1")], "greater than 0"),
+        (
+            vec![("currency", "USD"), ("rate", "abc")],
+            "must be a number",
+        ),
+    ] {
+        let res = h
+            .app
+            .clone()
+            .oneshot(post(
+                "/donations",
+                &admin,
+                &donation_form("csrf-token", &fields),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY, "{fields:?}");
+        let html = body(res).await;
+        assert!(
+            html.contains(message),
+            "{fields:?}: expected {message:?} in {html}"
+        );
+    }
+    assert_eq!(h.store.list_donations(None).await.unwrap().len(), before);
+}
+
+#[tokio::test]
+async fn a_rejected_donation_keeps_what_was_typed() {
+    let h = harness(false).await;
+    let admin = session_cookie(&h.key, &session(true));
+    let res = h
+        .app
+        .oneshot(post(
+            "/donations",
+            &admin,
+            &donation_form(
+                "csrf-token",
+                &[("amount", "12.345"), ("note", "for the new release")],
+            ),
+        ))
+        .await
+        .unwrap();
+    let html = body(res).await;
+    assert!(html.contains("value=\"12.345\""));
+    assert!(html.contains("for the new release"));
+    assert!(
+        html.contains("<option value=\"tokio-rs-axum\" selected"),
+        "the project stays chosen"
+    );
+}
+
+#[tokio::test]
+async fn admins_void_a_donation_and_it_stays_in_the_history() {
+    let h = harness(false).await;
+    let admin = session_cookie(&h.key, &session(true));
+    let id = h
+        .store
+        .list_donations(Some("bigskysoftware-htmx"))
+        .await
+        .unwrap()[0]
+        .id;
+    let res = h
+        .app
+        .clone()
+        .oneshot(post(
+            &format!("/donations/{id}/void"),
+            &admin,
+            &[("_csrf", "csrf-token"), ("project", "")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers()[header::LOCATION],
+        "/donations?notice=voided&project="
+    );
+
+    let res = h
+        .app
+        .clone()
+        .oneshot(get("/donations", &admin))
+        .await
+        .unwrap();
+    let html = body(res).await;
+    assert!(html.contains("voided"));
+    assert!(html.contains("alice, 2026-"), "who and when: {html}");
+    // The total no longer includes it: 25.00 + 9.20.
+    assert!(html.contains("34.20 EUR"), "{html}");
+
+    // Voiding again is refused, with the reason.
+    let res = h
+        .app
+        .oneshot(post(
+            &format!("/donations/{id}/void"),
+            &admin,
+            &[("_csrf", "csrf-token"), ("project", "")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    assert!(body(res).await.contains("already voided"));
+}
+
+#[tokio::test]
+async fn donation_changes_need_admin_csrf_and_origin() {
+    let h = harness(false).await;
+    let admin = session_cookie(&h.key, &session(true));
+    let reader = session_cookie(&h.key, &session(false));
+    let before = h.store.list_donations(None).await.unwrap();
+    let id = before[0].id;
+    for (path, fields) in [
+        ("/donations".to_string(), donation_form("csrf-token", &[])),
+        (
+            format!("/donations/{id}/void"),
+            vec![("_csrf", "csrf-token")],
+        ),
+    ] {
+        let with_csrf = |csrf: &str| -> Vec<(String, String)> {
+            fields
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.to_string(),
+                        if *k == "_csrf" {
+                            csrf.to_string()
+                        } else {
+                            v.to_string()
+                        },
+                    )
+                })
+                .collect()
+        };
+        let send = |cookie: &str, origin: Option<&str>, csrf: &str| {
+            let owned = with_csrf(csrf);
+            let refs: Vec<(&str, &str)> = owned
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            form_post(&path, cookie, origin, &encode(&refs))
+        };
+        let r = |req| h.app.clone().oneshot(req);
+        assert_eq!(
+            r(send(&reader, Some(ORIGIN), "csrf-token"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN,
+            "reader {path}"
+        );
+        assert_eq!(
+            r(send(&admin, Some(ORIGIN), "wrong"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN,
+            "csrf {path}"
+        );
+        assert_eq!(
+            r(send(&admin, None, "csrf-token")).await.unwrap().status(),
+            StatusCode::FORBIDDEN,
+            "origin {path}"
+        );
+    }
+    assert_eq!(h.store.list_donations(None).await.unwrap(), before);
+}
+
+#[tokio::test]
+async fn a_stale_login_must_re_authenticate_before_recording() {
+    let h = harness_args(false, &["--step-up-max-age", "15m"]).await;
+    let mut stale = session(true);
+    stale.auth_time = Some(jiff::Timestamp::now().as_second() - 3600);
+    let cookie = session_cookie(&h.key, &stale);
+    let before = h.store.list_donations(None).await.unwrap().len();
+    let res = h
+        .app
+        .clone()
+        .oneshot(post(
+            "/donations",
+            &cookie,
+            &donation_form("csrf-token", &[]),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers()[header::LOCATION],
+        "/auth/login?reauth=true&next=%2Fdonations"
+    );
+    let id = h.store.list_donations(None).await.unwrap()[0].id;
+    let res = h
+        .app
+        .clone()
+        .oneshot(post(
+            &format!("/donations/{id}/void"),
+            &cookie,
+            &[("_csrf", "csrf-token")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        h.store.list_donations(None).await.unwrap().len(),
+        before,
+        "nothing was recorded"
+    );
+
+    // A fresh login records.
+    let fresh = session_cookie(&h.key, &session(true));
+    let res = h
+        .app
+        .oneshot(post(
+            "/donations",
+            &fresh,
+            &donation_form("csrf-token", &[]),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        res.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .contains("notice=recorded")
+    );
+}
+
+#[tokio::test]
+async fn the_project_page_shows_its_donations() {
+    let h = harness(false).await;
+    let admin = session_cookie(&h.key, &session(true));
+    let res = h
+        .app
+        .clone()
+        .oneshot(get("/projects/serde-rs-serde", &admin))
+        .await
+        .unwrap();
+    let html = body(res).await;
+    assert!(html.contains("1 so far, 9.20 EUR in total."), "{html}");
+    assert!(html.contains("10.00 USD"));
+    assert!(html.contains("/donations?project=serde-rs-serde#record"));
+    // A project with none says so.
+    let res = h
+        .app
+        .oneshot(get("/projects/prometheus-prometheus", &admin))
+        .await
+        .unwrap();
+    let html = body(res).await;
+    assert!(html.contains("0 so far, 0.00 EUR in total."));
+    assert!(html.contains("No donations recorded yet."));
+}
+
+#[tokio::test]
+async fn the_project_list_shows_the_last_donation() {
+    let h = harness(false).await;
+    let reader = session_cookie(&h.key, &session(false));
+    let res = h.app.oneshot(get("/", &reader)).await.unwrap();
+    let html = body(res).await;
+    // The demo's clock is 2026-09-26: htmx 30 days ago, serde 90 days (3 months).
+    assert!(html.contains("30d ago"), "{html}");
+    assert!(html.contains("3mo ago"));
+    assert!(html.contains("never"), "projects nobody donated to");
+}

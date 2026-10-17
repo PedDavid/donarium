@@ -61,6 +61,10 @@ github:
     existingSecret: ""
     key: token
 
+# The currency totals are kept in (a three-letter code). It is fixed for a
+# database the first time it is used: changing it later is refused.
+baseCurrency: EUR
+
 # How often all sources are scanned. "0s" turns scheduled scans off (they can
 # still be started from the UI).
 scanInterval: 24h

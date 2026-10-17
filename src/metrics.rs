@@ -7,9 +7,11 @@ use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
+use std::sync::atomic::AtomicU64;
 use tokio::sync::Mutex;
 
 use crate::store::{Store, StoreError};
+use crate::web::views::minor_to_major;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct ProjectLabels {
@@ -20,6 +22,13 @@ struct ProjectLabels {
 struct SourceLabels {
     state: String,
 }
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct CurrencyLabels {
+    currency: String,
+}
+
+type FloatGauge = Gauge<f64, AtomicU64>;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct ScanLabels {
@@ -33,6 +42,11 @@ pub struct Metrics {
     sources: Family<SourceLabels, Gauge>,
     scan_time: Family<ScanLabels, Gauge>,
     scan_ok: Family<ScanLabels, Gauge>,
+    donated_base: Family<CurrencyLabels, FloatGauge>,
+    donated_paid: Family<CurrencyLabels, FloatGauge>,
+    donations: Gauge,
+    unconverted: Gauge,
+    last_donation: Family<ProjectLabels, Gauge>,
     /// Held from refresh to encode, so a scrape never sees a half-built state.
     scrape: Mutex<()>,
 }
@@ -64,18 +78,53 @@ impl Metrics {
             "1 if the last scan of an enabled source worked, 0 if it failed",
             scan_ok.clone(),
         );
+        let donated_base = Family::default();
+        registry.register(
+            "donarium_donated_base_amount",
+            "Donations that count, in the base currency (those awaiting a conversion are left out)",
+            donated_base.clone(),
+        );
+        let donated_paid = Family::default();
+        registry.register(
+            "donarium_donated_paid_amount",
+            "Donations that count, in the currencies they were paid in",
+            donated_paid.clone(),
+        );
+        let donations = Gauge::default();
+        registry.register(
+            "donarium_donations",
+            "Number of donations that count (not voided)",
+            donations.clone(),
+        );
+        let unconverted = Gauge::default();
+        registry.register(
+            "donarium_donations_without_conversion",
+            "Donations still waiting for their amount in the base currency",
+            unconverted.clone(),
+        );
+        let last_donation = Family::default();
+        registry.register(
+            "donarium_last_donation_timestamp_seconds",
+            "Unix time of the last donation to a project (the day, at 00:00 UTC)",
+            last_donation.clone(),
+        );
         Arc::new(Metrics {
             registry,
             usage,
             sources,
             scan_time,
             scan_ok,
+            donated_base,
+            donated_paid,
+            donations,
+            unconverted,
+            last_donation,
             scrape: Mutex::new(()),
         })
     }
 
     /// The OpenMetrics text for `/metrics`, with gauges read from `store`.
-    pub async fn render(&self, store: &Store) -> Result<String, StoreError> {
+    pub async fn render(&self, store: &Store, base_currency: &str) -> Result<String, StoreError> {
         let _scrape = self.scrape.lock().await;
         let projects = store.list_projects().await?;
         let sources = store.list_sources().await?;
@@ -97,6 +146,33 @@ impl Metrics {
                     state: state.into(),
                 })
                 .set(count as i64);
+        }
+        let totals = store.donation_totals(None).await?;
+        self.donated_base.clear();
+        self.donated_paid.clear();
+        self.last_donation.clear();
+        self.donated_base
+            .get_or_create(&CurrencyLabels {
+                currency: base_currency.into(),
+            })
+            .set(minor_to_major(totals.base_minor, base_currency));
+        for (currency, minor) in &totals.by_currency {
+            self.donated_paid
+                .get_or_create(&CurrencyLabels {
+                    currency: currency.clone(),
+                })
+                .set(minor_to_major(*minor, currency));
+        }
+        self.donations.set(totals.count as i64);
+        self.unconverted.set(totals.unconverted as i64);
+        for p in &projects {
+            if let Some(at) = p.last_donation {
+                self.last_donation
+                    .get_or_create(&ProjectLabels {
+                        project: p.name.clone(),
+                    })
+                    .set(at.as_second());
+            }
         }
         self.scan_time.clear();
         self.scan_ok.clear();
@@ -131,7 +207,7 @@ mod tests {
             .await
             .unwrap();
         let metrics = Metrics::new();
-        let text = metrics.render(&store).await.unwrap();
+        let text = metrics.render(&store, "EUR").await.unwrap();
         assert!(
             text.contains("donarium_project_usage_score{project=\"tokio-rs-tokio\"}"),
             "{text}"
@@ -153,11 +229,23 @@ mod tests {
             .await
             .unwrap();
         let metrics = Metrics::new();
-        assert!(metrics.render(&store).await.unwrap().contains("htmx"));
-        sqlx::query("DELETE FROM project WHERE name = 'bigskysoftware-htmx'")
+        assert!(
+            metrics
+                .render(&store, "EUR")
+                .await
+                .unwrap()
+                .contains("prometheus-prometheus")
+        );
+        sqlx::query("DELETE FROM project WHERE name = 'prometheus-prometheus'")
             .execute(store.pool())
             .await
             .unwrap();
-        assert!(!metrics.render(&store).await.unwrap().contains("htmx"));
+        assert!(
+            !metrics
+                .render(&store, "EUR")
+                .await
+                .unwrap()
+                .contains("prometheus-prometheus")
+        );
     }
 }

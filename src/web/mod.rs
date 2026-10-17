@@ -2,10 +2,11 @@
 //! separate metrics/health router.
 
 pub mod auth;
+mod donations;
 mod pages;
 mod projects;
 mod sources;
-mod views;
+pub mod views;
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
@@ -239,6 +240,8 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(projects::index))
         .route("/search", get(pages::search))
+        .route("/donations", get(donations::index).post(donations::record))
+        .route("/donations/{id}/void", post(donations::void))
         .route("/projects", post(projects::create))
         .route(
             "/projects/{name}",
@@ -273,15 +276,16 @@ pub fn router(state: AppState) -> Router {
 }
 
 /// `/metrics`, `/healthz` and `/readyz`, served on their own port.
-pub fn ops_router(store: Arc<Store>, metrics: Arc<Metrics>) -> Router {
+pub fn ops_router(store: Arc<Store>, metrics: Arc<Metrics>, base_currency: String) -> Router {
     let scrape_store = store.clone();
     Router::new()
         .route(
             "/metrics",
             get(move || {
-                let (store, metrics) = (scrape_store.clone(), metrics.clone());
+                let (store, metrics, base) =
+                    (scrape_store.clone(), metrics.clone(), base_currency.clone());
                 async move {
-                    match metrics.render(&store).await {
+                    match metrics.render(&store, &base).await {
                         Ok(text) => (
                             [(
                                 header::CONTENT_TYPE,

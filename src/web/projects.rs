@@ -13,7 +13,7 @@ use tracing::info;
 
 use super::auth::{Admin, User};
 use super::pages::{Ctx, Feedback, Filters, Layout, is_htmx, rows};
-use super::views::{FundingLink, ProjectRow, fmt_weight};
+use super::views::{DonationRow, FundingLink, ProjectRow, fmt_money, fmt_weight};
 use super::{AppError, AppState};
 use crate::funding;
 use crate::model::ProjectUpdate;
@@ -238,6 +238,13 @@ struct DetailPage {
     error: String,
     settings: SettingsValues,
     funding: FundingValues,
+    donations: Vec<DonationRow>,
+    /// Always false here: the project is the page.
+    show_project: bool,
+    /// Keeps the donations table's void buttons on this project afterwards.
+    filter: String,
+    /// What this project's donations add up to, in the base currency.
+    donated: String,
 }
 
 pub async fn detail(
@@ -282,8 +289,23 @@ async fn render_detail(
         .iter()
         .map(|(id, label)| (*id, *label, *id == funding_values.platform))
         .collect();
+    let base = &ctx.state.inner.cfg.base_currency;
+    let donations = ctx
+        .state
+        .inner
+        .store
+        .list_donations(Some(&project.name))
+        .await?
+        .iter()
+        .map(|d| DonationRow::new(d, base))
+        .collect();
+    let donated = fmt_money(project.donated_base_minor, base);
     let page = DetailPage {
         layout: Layout::new(ctx.state, ctx.session, ctx.jar, project.name.clone()),
+        donations,
+        show_project: false,
+        filter: project.name.clone(),
+        donated,
         links: project.funding.iter().map(FundingLink::new).collect(),
         project: ProjectRow::new(&project, ctx.state.now()),
         platforms,

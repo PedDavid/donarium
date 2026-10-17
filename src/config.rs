@@ -78,6 +78,11 @@ pub struct Config {
     #[arg(long, env = "DONARIUM_GITHUB_TOKEN_FILE")]
     pub github_token_file: Option<PathBuf>,
 
+    /// The currency totals are kept in, as a three-letter code. Fixed for a
+    /// database the first time it is used.
+    #[arg(long, env = "DONARIUM_BASE_CURRENCY", default_value = "EUR")]
+    pub base_currency: String,
+
     /// How often all sources are scanned. 0s turns scheduled scans off; scans
     /// can still be started from the UI.
     #[arg(long, env = "DONARIUM_SCAN_INTERVAL", default_value = "24h", value_parser = parse_duration)]
@@ -169,6 +174,14 @@ impl Config {
 
     /// Checks between flags that clap cannot express.
     pub fn check(&self) -> Result<(), String> {
+        if crate::money::parse_currency(&self.base_currency).as_deref()
+            != Ok(self.base_currency.as_str())
+        {
+            return Err(format!(
+                "--base-currency must be a three-letter upper-case code such as EUR (got {:?})",
+                self.base_currency
+            ));
+        }
         for (flag, url) in [
             ("--gitlab-url", Some(&self.gitlab_url)),
             ("--gitea-url", self.gitea_url.as_ref()),
@@ -226,6 +239,23 @@ mod tests {
             cfg.url_for("/projects/a"),
             "http://localhost:8080/projects/a"
         );
+    }
+
+    #[test]
+    fn the_base_currency_must_be_a_currency_code() {
+        let ok = Config::try_parse_from(["donarium", "--base-currency", "USD"]).unwrap();
+        assert!(ok.check().is_ok());
+        assert_eq!(
+            Config::try_parse_from(["donarium"]).unwrap().base_currency,
+            "EUR"
+        );
+        for bad in ["eur", "EURO", "E1R", ""] {
+            let cfg = Config::try_parse_from(["donarium", "--base-currency", bad]).unwrap();
+            assert!(
+                cfg.check().unwrap_err().contains("--base-currency"),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

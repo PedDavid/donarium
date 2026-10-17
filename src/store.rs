@@ -12,8 +12,8 @@ use sqlx::sqlite::{
 use sqlx::{Row, SqlitePool};
 
 use crate::model::{
-    Actor, Funding, NewSource, Origin, Project, ProjectUpdate, Provider, ScanMethod, Source,
-    SourceUpdate, TRANSITIVE_FACTOR,
+    Actor, Conversion, Donation, DonationKind, Funding, FxSource, NewDonation, NewSource, Origin,
+    Project, ProjectUpdate, Provider, ScanMethod, Source, SourceUpdate, TRANSITIVE_FACTOR, Totals,
 };
 use crate::scan::manifests::{ImageUse, Skipped};
 use crate::scan::resolve::slug;
@@ -536,7 +536,10 @@ impl Store {
         }
         let pruned = sqlx::query(
             "DELETE FROM project
-              WHERE origin = 'discovered' AND id NOT IN (SELECT project_id FROM usage)",
+              WHERE origin = 'discovered'
+                AND id NOT IN (SELECT project_id FROM usage)
+                -- A project you donated to stays, whatever happens to its sources.
+                AND id NOT IN (SELECT project_id FROM donation)",
         )
         .execute(&mut *tx)
         .await?
@@ -547,6 +550,203 @@ impl Store {
             unresolved: unresolved.len(),
             pruned: pruned as usize,
         })
+    }
+
+    // --- donations ---
+
+    /// Remembers the base currency of this database on first use, and refuses
+    /// a different one later: totals are kept in it, and mixing two would make
+    /// them meaningless.
+    pub async fn ensure_base_currency(&self, base: &str) -> Result<(), StoreError> {
+        sqlx::query("INSERT OR IGNORE INTO meta (key, value) VALUES ('base_currency', ?)")
+            .bind(base)
+            .execute(&self.pool)
+            .await?;
+        let stored: String =
+            sqlx::query_scalar("SELECT value FROM meta WHERE key = 'base_currency'")
+                .fetch_one(&self.pool)
+                .await?;
+        if stored != base {
+            return Err(StoreError::InUse(format!(
+                "this database keeps its totals in {stored}, but --base-currency is {base}; \
+                 changing the base currency is not supported yet"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Records a donation. The project must exist.
+    pub async fn record_donation(
+        &self,
+        new: &NewDonation,
+        by: &Actor,
+        now: Timestamp,
+    ) -> Result<Donation, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let project = project_id(&mut tx, &new.project).await?;
+        let (base, rate, source) = match &new.conversion {
+            Some(c) => (Some(c.base_minor), Some(c.rate), Some(c.source.as_str())),
+            None => (None, None, None),
+        };
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO donation (project_id, platform, amount_minor, currency, donated_on,
+                                   base_amount_minor, fx_rate, fx_source, kind, note,
+                                   recorded_by, recorded_by_name, recorded_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        )
+        .bind(project)
+        .bind(&new.platform)
+        .bind(new.amount_minor)
+        .bind(&new.currency)
+        .bind(new.donated_on.to_string())
+        .bind(base)
+        .bind(rate)
+        .bind(source)
+        .bind(new.kind.as_str())
+        .bind(&new.note)
+        .bind(&by.sub)
+        .bind(&by.name)
+        .bind(now.to_string())
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        self.get_donation(id).await?.ok_or(StoreError::NotFound)
+    }
+
+    /// Cancels a donation with a void entry. The donation stays in the history,
+    /// marked as voided, and stops counting.
+    pub async fn void_donation(
+        &self,
+        id: i64,
+        by: &Actor,
+        now: Timestamp,
+    ) -> Result<(), StoreError> {
+        let is_void: Option<bool> =
+            sqlx::query_scalar("SELECT voids_id IS NOT NULL FROM donation WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+        match is_void {
+            None => return Err(StoreError::NotFound),
+            Some(true) => return Err(StoreError::InUse("a void entry cannot be voided".into())),
+            Some(false) => {}
+        }
+        sqlx::query(
+            "INSERT INTO donation (project_id, platform, amount_minor, currency, donated_on,
+                                   base_amount_minor, fx_rate, fx_source, kind, note,
+                                   recorded_by, recorded_by_name, recorded_at, voids_id)
+             SELECT project_id, platform, amount_minor, currency, donated_on,
+                    base_amount_minor, fx_rate, fx_source, kind, note, ?, ?, ?, id
+               FROM donation WHERE id = ?",
+        )
+        .bind(&by.sub)
+        .bind(&by.name)
+        .bind(now.to_string())
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| match e.as_database_error() {
+            Some(db) if db.is_unique_violation() => {
+                StoreError::InUse("this donation is already voided".into())
+            }
+            _ => StoreError::Db(e),
+        })?;
+        Ok(())
+    }
+
+    const DONATION_SELECT: &'static str =
+        "SELECT d.*, p.name AS project_name, p.repo AS project_repo,
+                v.recorded_at AS voided_at, v.recorded_by AS voided_by,
+                v.recorded_by_name AS voided_by_name
+           FROM donation d
+           JOIN project p ON p.id = d.project_id
+           LEFT JOIN donation v ON v.voids_id = d.id";
+
+    pub async fn get_donation(&self, id: i64) -> Result<Option<Donation>, StoreError> {
+        sqlx::query(&format!(
+            "{} WHERE d.id = ? AND d.voids_id IS NULL",
+            Self::DONATION_SELECT
+        ))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .as_ref()
+        .map(donation_from_row)
+        .transpose()
+    }
+
+    /// Donations, newest first, with voided ones marked. Void entries are not
+    /// listed: they are the mark on the donation they cancel. Limited to one
+    /// project if `project` is given.
+    pub async fn list_donations(&self, project: Option<&str>) -> Result<Vec<Donation>, StoreError> {
+        let filter = if project.is_some() {
+            "AND p.name = ?"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "{} WHERE d.voids_id IS NULL {filter} ORDER BY d.donated_on DESC, d.id DESC",
+            Self::DONATION_SELECT
+        );
+        let mut query = sqlx::query(&sql);
+        if let Some(name) = project {
+            query = query.bind(name);
+        }
+        query
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(donation_from_row)
+            .collect()
+    }
+
+    /// What the donations that count add up to, for all projects or one.
+    pub async fn donation_totals(&self, project: Option<&str>) -> Result<Totals, StoreError> {
+        let filter = if project.is_some() {
+            "AND p.name = ?"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "SELECT d.currency, d.donated_on, d.amount_minor, d.base_amount_minor
+               FROM donation d JOIN project p ON p.id = d.project_id
+              WHERE d.voids_id IS NULL
+                AND NOT EXISTS (SELECT 1 FROM donation v WHERE v.voids_id = d.id)
+                {filter}"
+        );
+        let mut query = sqlx::query(&sql);
+        if let Some(name) = project {
+            query = query.bind(name);
+        }
+        let rows = query.fetch_all(&self.pool).await?;
+        let mut totals = Totals::default();
+        let mut by_currency: HashMap<String, i64> = HashMap::new();
+        let mut by_year: HashMap<i32, i64> = HashMap::new();
+        for row in &rows {
+            totals.count += 1;
+            let currency: String = row.try_get("currency")?;
+            let amount: i64 = row.try_get("amount_minor")?;
+            *by_currency.entry(currency).or_default() += amount;
+            match row.try_get::<Option<i64>, _>("base_amount_minor")? {
+                Some(base) => {
+                    totals.base_minor += base;
+                    let day: String = row.try_get("donated_on")?;
+                    let year = day
+                        .get(..4)
+                        .and_then(|y| y.parse().ok())
+                        .ok_or_else(|| corrupt("donation date", &day))?;
+                    *by_year.entry(year).or_default() += base;
+                }
+                None => totals.unconverted += 1,
+            }
+        }
+        totals.by_currency = by_currency.into_iter().collect();
+        totals
+            .by_currency
+            .sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        totals.by_year = by_year.into_iter().collect();
+        totals.by_year.sort_by(|a, b| b.0.cmp(&a.0));
+        Ok(totals)
     }
 
     // --- projects ---
@@ -561,9 +761,21 @@ impl Store {
                     COALESCE(SUM(per.weight * per.factor), 0.0) AS scanned,
                     COALESCE(o.manual_usage, 0.0) AS manual_usage,
                     COALESCE(o.ignore, 0) AS ignore,
-                    COALESCE(o.notes, '') AS notes
+                    COALESCE(o.notes, '') AS notes,
+                    COALESCE(don.n, 0) AS donation_count,
+                    COALESCE(don.base, 0) AS donated_base,
+                    don.last_on AS last_on
                FROM project p
                LEFT JOIN project_override o ON o.project_id = p.id
+               LEFT JOIN (
+                    SELECT d.project_id, COUNT(*) AS n,
+                           COALESCE(SUM(d.base_amount_minor), 0) AS base,
+                           MAX(d.donated_on) AS last_on
+                      FROM donation d
+                     WHERE d.voids_id IS NULL
+                       AND NOT EXISTS (SELECT 1 FROM donation v WHERE v.voids_id = d.id)
+                     GROUP BY d.project_id
+               ) don ON don.project_id = p.id
                LEFT JOIN (
                     -- One row per (source, project): when both an image scan and
                     -- a dependency scan found it, the stronger kind counts once.
@@ -611,8 +823,16 @@ impl Store {
                     manual_usage,
                     ignored: row.try_get("ignore")?,
                     notes: row.try_get("notes")?,
-                    // Filled in once donations are stored.
-                    last_donation: None,
+                    last_donation: row
+                        .try_get::<Option<String>, _>("last_on")?
+                        .map(|day| {
+                            format!("{day}T00:00:00Z")
+                                .parse()
+                                .map_err(|_| corrupt("donation date", &day))
+                        })
+                        .transpose()?,
+                    donation_count: row.try_get("donation_count")?,
+                    donated_base_minor: row.try_get("donated_base")?,
                     name,
                 })
             })
@@ -705,11 +925,12 @@ impl Store {
             .bind(id)
             .execute(&mut *tx)
             .await
-            .map_err(|e| match e.as_database_error() {
-                Some(db) if db.is_foreign_key_violation() => {
+            .map_err(|e| {
+                if is_foreign_key_violation(&e) {
                     StoreError::InUse("this project has donations, which are never deleted".into())
+                } else {
+                    StoreError::Db(e)
                 }
-                _ => StoreError::Db(e),
             })?;
         tx.commit().await?;
         Ok(())
@@ -892,6 +1113,15 @@ pub struct UsageSummary {
     pub pruned: usize,
 }
 
+/// SQLite reports a refused `ON DELETE RESTRICT` as a constraint error of its
+/// trigger variety (code 1811) rather than the foreign-key one (787), so
+/// sqlx does not call it a foreign-key violation; the message is the same.
+fn is_foreign_key_violation(e: &sqlx::Error) -> bool {
+    e.as_database_error().is_some_and(|db| {
+        db.is_foreign_key_violation() || db.message().contains("FOREIGN KEY constraint failed")
+    })
+}
+
 fn map_unique(e: sqlx::Error) -> StoreError {
     match e.as_database_error() {
         Some(db) if db.is_unique_violation() => StoreError::Duplicate,
@@ -906,6 +1136,51 @@ fn corrupt(what: &str, value: &str) -> StoreError {
 fn timestamp(row: &SqliteRow, column: &str) -> Result<Timestamp, StoreError> {
     let raw: String = row.try_get(column)?;
     raw.parse().map_err(|_| corrupt(column, &raw))
+}
+
+fn donation_from_row(row: &SqliteRow) -> Result<Donation, StoreError> {
+    let day: String = row.try_get("donated_on")?;
+    let kind: String = row.try_get("kind")?;
+    let conversion = match (
+        row.try_get::<Option<i64>, _>("base_amount_minor")?,
+        row.try_get::<Option<f64>, _>("fx_rate")?,
+        row.try_get::<Option<String>, _>("fx_source")?,
+    ) {
+        (Some(base_minor), Some(rate), Some(source)) => Some(Conversion {
+            base_minor,
+            rate,
+            source: FxSource::parse(&source).ok_or_else(|| corrupt("fx source", &source))?,
+        }),
+        _ => None,
+    };
+    let voided = match row.try_get::<Option<String>, _>("voided_at")? {
+        Some(at) => Some((
+            Actor::new(
+                row.try_get::<String, _>("voided_by")?,
+                row.try_get::<String, _>("voided_by_name")?,
+            ),
+            at.parse().map_err(|_| corrupt("voided_at", &at))?,
+        )),
+        None => None,
+    };
+    Ok(Donation {
+        id: row.try_get("id")?,
+        project: row.try_get("project_name")?,
+        project_repo: row.try_get("project_repo")?,
+        platform: row.try_get("platform")?,
+        amount_minor: row.try_get("amount_minor")?,
+        currency: row.try_get("currency")?,
+        donated_on: day.parse().map_err(|_| corrupt("donated_on", &day))?,
+        conversion,
+        kind: DonationKind::parse(&kind).ok_or_else(|| corrupt("donation kind", &kind))?,
+        note: row.try_get("note")?,
+        recorded_by: Actor::new(
+            row.try_get::<String, _>("recorded_by")?,
+            row.try_get::<String, _>("recorded_by_name")?,
+        ),
+        recorded_at: timestamp(row, "recorded_at")?,
+        voided,
+    })
 }
 
 fn source_from_row(row: &SqliteRow) -> Result<Source, StoreError> {
@@ -1309,6 +1584,441 @@ mod tests {
             store.add_funding("nope", "kofi", "x", None).await,
             Err(StoreError::NotFound)
         ));
+    }
+
+    // --- donations ---
+
+    use jiff::civil::date;
+
+    async fn store_with_project() -> Store {
+        let store = Store::memory().await.unwrap();
+        store
+            .create_project("github.com/tokio-rs/tokio", 1.0, "", &actor(), now())
+            .await
+            .unwrap();
+        store
+            .create_project("github.com/serde-rs/serde", 1.0, "", &actor(), now())
+            .await
+            .unwrap();
+        store
+    }
+
+    fn donation(
+        project: &str,
+        minor: i64,
+        currency: &str,
+        day: jiff::civil::Date,
+        base: Option<i64>,
+    ) -> NewDonation {
+        NewDonation {
+            project: project.into(),
+            platform: "github-sponsors".into(),
+            amount_minor: minor,
+            currency: currency.into(),
+            donated_on: day,
+            kind: DonationKind::OneOff,
+            note: String::new(),
+            conversion: base.map(|b| Conversion {
+                base_minor: b,
+                rate: b as f64 / minor as f64,
+                source: if currency == "EUR" {
+                    FxSource::Same
+                } else {
+                    FxSource::Manual
+                },
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn donations_are_recorded_and_listed_newest_first() {
+        let store = store_with_project().await;
+        let first = store
+            .record_donation(
+                &donation("tokio-rs-tokio", 1000, "EUR", date(2026, 3, 1), Some(1000)),
+                &actor(),
+                now(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.project, "tokio-rs-tokio");
+        assert_eq!(first.project_repo, "github.com/tokio-rs/tokio");
+        assert_eq!(first.amount_minor, 1000);
+        assert_eq!(first.donated_on, date(2026, 3, 1));
+        assert_eq!(first.conversion.unwrap().source, FxSource::Same);
+        assert_eq!(first.recorded_by, actor());
+        assert_eq!(first.voided, None);
+        store
+            .record_donation(
+                &donation("serde-rs-serde", 500, "USD", date(2026, 9, 1), Some(460)),
+                &actor(),
+                now(),
+            )
+            .await
+            .unwrap();
+        store
+            .record_donation(
+                &donation("tokio-rs-tokio", 250, "USD", date(2026, 6, 1), None),
+                &actor(),
+                now(),
+            )
+            .await
+            .unwrap();
+
+        let all = store.list_donations(None).await.unwrap();
+        let days: Vec<_> = all.iter().map(|d| d.donated_on).collect();
+        assert_eq!(days, [date(2026, 9, 1), date(2026, 6, 1), date(2026, 3, 1)]);
+        assert_eq!(all[1].conversion, None, "pending until converted");
+        let tokio = store.list_donations(Some("tokio-rs-tokio")).await.unwrap();
+        assert_eq!(tokio.len(), 2);
+        assert!(store.list_donations(Some("nope")).await.unwrap().is_empty());
+        assert!(matches!(
+            store
+                .record_donation(
+                    &donation("nope", 100, "EUR", date(2026, 1, 1), Some(100)),
+                    &actor(),
+                    now()
+                )
+                .await,
+            Err(StoreError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_database_refuses_nonsense_donations() {
+        let store = store_with_project().await;
+        let record = |d: NewDonation| {
+            let store = store.clone();
+            async move { store.record_donation(&d, &actor(), now()).await }
+        };
+        assert!(
+            record(donation("tokio-rs-tokio", 0, "EUR", date(2026, 1, 1), None))
+                .await
+                .is_err()
+        );
+        assert!(
+            record(donation(
+                "tokio-rs-tokio",
+                -5,
+                "EUR",
+                date(2026, 1, 1),
+                None
+            ))
+            .await
+            .is_err()
+        );
+        assert!(
+            record(donation(
+                "tokio-rs-tokio",
+                100,
+                "eur",
+                date(2026, 1, 1),
+                None
+            ))
+            .await
+            .is_err()
+        );
+        assert!(
+            record(donation(
+                "tokio-rs-tokio",
+                100,
+                "EURO",
+                date(2026, 1, 1),
+                None
+            ))
+            .await
+            .is_err()
+        );
+        // A base amount without a rate (or the other way round) is inconsistent.
+        let mut half = donation("tokio-rs-tokio", 100, "EUR", date(2026, 1, 1), Some(100));
+        sqlx::query("DELETE FROM project WHERE 0")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let ok = record(half.clone()).await.unwrap();
+        assert!(ok.conversion.is_some());
+        let broken = sqlx::query(
+            "INSERT INTO donation (project_id, platform, amount_minor, currency, donated_on, base_amount_minor,
+                                   kind, note, recorded_by, recorded_at)
+             SELECT id, 'x', 100, 'EUR', '2026-01-01', 100, 'one_off', '', 'u', 'x' FROM project LIMIT 1",
+        )
+        .execute(store.pool())
+        .await;
+        assert!(broken.is_err(), "a base amount needs its rate and source");
+        half.conversion = None;
+        assert!(record(half).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn donations_are_append_only() {
+        let store = store_with_project().await;
+        let d = store
+            .record_donation(
+                &donation("tokio-rs-tokio", 1000, "EUR", date(2026, 3, 1), Some(1000)),
+                &actor(),
+                now(),
+            )
+            .await
+            .unwrap();
+        let pending = store
+            .record_donation(
+                &donation("tokio-rs-tokio", 500, "USD", date(2026, 3, 2), None),
+                &actor(),
+                now(),
+            )
+            .await
+            .unwrap();
+
+        // Nothing can be deleted...
+        let delete = sqlx::query("DELETE FROM donation WHERE id = ?")
+            .bind(d.id)
+            .execute(store.pool())
+            .await;
+        assert!(delete.unwrap_err().to_string().contains("never deleted"));
+        // ...or edited, whatever the column.
+        for column_change in [
+            "amount_minor = 1",
+            "currency = 'USD'",
+            "donated_on = '2000-01-01'",
+            "note = 'changed'",
+            "platform = 'other'",
+            "kind = 'recurring'",
+            "recorded_by = 'someone else'",
+            "base_amount_minor = 1, fx_rate = 1.0, fx_source = 'manual'",
+        ] {
+            let result = sqlx::query(&format!("UPDATE donation SET {column_change} WHERE id = ?"))
+                .bind(d.id)
+                .execute(store.pool())
+                .await;
+            assert!(result.is_err(), "{column_change} must be refused");
+        }
+        assert_eq!(store.get_donation(d.id).await.unwrap().unwrap(), d);
+
+        // The one exception: a pending conversion can be filled in, once.
+        sqlx::query("UPDATE donation SET base_amount_minor = 460, fx_rate = 0.92, fx_source = 'ecb' WHERE id = ?")
+            .bind(pending.id)
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let filled = store.get_donation(pending.id).await.unwrap().unwrap();
+        assert_eq!(filled.conversion.unwrap().base_minor, 460);
+        let again = sqlx::query("UPDATE donation SET base_amount_minor = 1, fx_rate = 1.0, fx_source = 'manual' WHERE id = ?")
+            .bind(pending.id)
+            .execute(store.pool())
+            .await;
+        assert!(again.is_err(), "a conversion is not changed afterwards");
+        let other = sqlx::query("UPDATE donation SET note = 'x' WHERE id = ?")
+            .bind(pending.id)
+            .execute(store.pool())
+            .await;
+        assert!(other.is_err());
+    }
+
+    #[tokio::test]
+    async fn voiding_keeps_the_history_and_stops_counting() {
+        let store = store_with_project().await;
+        let keep = store
+            .record_donation(
+                &donation("tokio-rs-tokio", 1000, "EUR", date(2026, 3, 1), Some(1000)),
+                &actor(),
+                now(),
+            )
+            .await
+            .unwrap();
+        let wrong = store
+            .record_donation(
+                &donation("tokio-rs-tokio", 9000, "EUR", date(2026, 4, 1), Some(9000)),
+                &actor(),
+                now(),
+            )
+            .await
+            .unwrap();
+        let bob = Actor::new("u2", "bob");
+        let later: Timestamp = "2026-10-01T08:00:00Z".parse().unwrap();
+        store.void_donation(wrong.id, &bob, later).await.unwrap();
+
+        // Still listed, marked, with who and when; the void entry is not listed.
+        let all = store.list_donations(None).await.unwrap();
+        assert_eq!(all.len(), 2);
+        let voided = all.iter().find(|d| d.id == wrong.id).unwrap();
+        assert_eq!(voided.voided, Some((bob.clone(), later)));
+        assert_eq!(all.iter().find(|d| d.id == keep.id).unwrap().voided, None);
+        let raw: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM donation")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(raw, 3, "the void is its own row");
+
+        // It no longer counts anywhere.
+        let totals = store.donation_totals(None).await.unwrap();
+        assert_eq!((totals.count, totals.base_minor), (1, 1000));
+        let project = store.get_project("tokio-rs-tokio").await.unwrap().unwrap();
+        assert_eq!(
+            (project.donation_count, project.donated_base_minor),
+            (1, 1000)
+        );
+        assert_eq!(
+            project.last_donation,
+            Some("2026-03-01T00:00:00Z".parse().unwrap())
+        );
+
+        // Not twice, not a void, not something that does not exist.
+        assert!(
+            matches!(store.void_donation(wrong.id, &bob, later).await, Err(StoreError::InUse(m)) if m.contains("already"))
+        );
+        let void_id: i64 = sqlx::query_scalar("SELECT id FROM donation WHERE voids_id = ?")
+            .bind(wrong.id)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.void_donation(void_id, &bob, later).await,
+            Err(StoreError::InUse(_))
+        ));
+        assert!(matches!(
+            store.void_donation(9999, &bob, later).await,
+            Err(StoreError::NotFound)
+        ));
+        assert_eq!(
+            store.get_donation(void_id).await.unwrap(),
+            None,
+            "a void entry is not a donation"
+        );
+    }
+
+    #[tokio::test]
+    async fn totals_by_currency_and_year() {
+        let store = store_with_project().await;
+        let record = |p: &str, minor, cur: &str, day, base| {
+            let (store, d) = (store.clone(), donation(p, minor, cur, day, base));
+            async move { store.record_donation(&d, &actor(), now()).await.unwrap() }
+        };
+        record(
+            "tokio-rs-tokio",
+            1000,
+            "EUR",
+            date(2025, 12, 31),
+            Some(1000),
+        )
+        .await;
+        record("tokio-rs-tokio", 2000, "EUR", date(2026, 1, 1), Some(2000)).await;
+        record("serde-rs-serde", 500, "USD", date(2026, 2, 1), Some(460)).await;
+        record("serde-rs-serde", 300, "USD", date(2026, 2, 2), None).await;
+        record(
+            "serde-rs-serde",
+            150_000,
+            "JPY",
+            date(2026, 3, 3),
+            Some(900),
+        )
+        .await;
+
+        let t = store.donation_totals(None).await.unwrap();
+        assert_eq!(t.count, 5);
+        assert_eq!(t.base_minor, 1000 + 2000 + 460 + 900);
+        assert_eq!(t.unconverted, 1);
+        assert_eq!(t.by_year, [(2026, 3360), (2025, 1000)]);
+        // In the currencies they were paid in, largest first.
+        assert_eq!(
+            t.by_currency,
+            [
+                ("JPY".to_string(), 150_000),
+                ("EUR".to_string(), 3000),
+                ("USD".to_string(), 800)
+            ]
+        );
+
+        // Limited to one project.
+        let serde = store.donation_totals(Some("serde-rs-serde")).await.unwrap();
+        assert_eq!(
+            (serde.count, serde.base_minor, serde.unconverted),
+            (3, 460 + 900, 1)
+        );
+        assert_eq!(
+            store.donation_totals(Some("nope")).await.unwrap(),
+            Totals::default()
+        );
+
+        let empty = Store::memory()
+            .await
+            .unwrap()
+            .donation_totals(None)
+            .await
+            .unwrap();
+        assert_eq!(empty, Totals::default());
+    }
+
+    #[tokio::test]
+    async fn a_project_with_donations_is_never_pruned_or_deleted() {
+        let store = Store::memory().await.unwrap();
+        // A discovered project, used by a source.
+        let source = store
+            .create_source(&new_source("me/infra"), &actor(), now())
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO project (id, name, repo, first_seen_at, last_seen_at) VALUES (1, 'a-b', 'github.com/a/b', 'x', 'x')")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO usage (source_id, project_id, via, kind) VALUES (?, 1, 'images', 'direct')")
+            .bind(source.id)
+            .execute(store.pool())
+            .await
+            .unwrap();
+        store
+            .record_donation(
+                &donation("a-b", 1000, "EUR", date(2026, 1, 1), Some(1000)),
+                &actor(),
+                now(),
+            )
+            .await
+            .unwrap();
+
+        // The source goes away, and with it all usage: the project would be
+        // pruned, but you donated to it.
+        store.delete_source(source.id).await.unwrap();
+        store.rebuild_image_usage(now()).await.unwrap();
+        let project = store
+            .get_project("a-b")
+            .await
+            .unwrap()
+            .expect("kept because of its donation");
+        assert_eq!(project.usage_score, 0.0);
+        assert_eq!(project.donation_count, 1);
+
+        // The database itself refuses to delete it too.
+        let direct = sqlx::query("DELETE FROM project WHERE name = 'a-b'")
+            .execute(store.pool())
+            .await;
+        assert!(direct.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_manual_project_with_donations_cannot_be_deleted() {
+        let store = store_with_project().await;
+        store
+            .record_donation(
+                &donation("serde-rs-serde", 100, "EUR", date(2026, 1, 1), Some(100)),
+                &actor(),
+                now(),
+            )
+            .await
+            .unwrap();
+        let result = store.delete_project("serde-rs-serde").await;
+        assert!(matches!(
+            result,
+            Err(StoreError::InUse(m)) if m.contains("donations")
+        ));
+        assert!(store.get_project("serde-rs-serde").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn the_base_currency_is_fixed_for_a_database() {
+        let store = Store::memory().await.unwrap();
+        store.ensure_base_currency("EUR").await.unwrap();
+        store.ensure_base_currency("EUR").await.unwrap();
+        let err = store.ensure_base_currency("USD").await.unwrap_err();
+        assert!(err.to_string().contains("keeps its totals in EUR"), "{err}");
     }
 
     #[tokio::test]

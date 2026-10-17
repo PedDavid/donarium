@@ -82,6 +82,10 @@ pub struct Project {
     pub ignored: bool,
     pub notes: String,
     pub last_donation: Option<Timestamp>,
+    /// Donations that count (not voided), and what they add up to in the base
+    /// currency (those still waiting for a conversion are left out).
+    pub donation_count: i64,
+    pub donated_base_minor: i64,
     pub funding: Vec<Funding>,
 }
 
@@ -239,3 +243,122 @@ pub struct SourceUpdate {
 
 /// Share of a transitive dependency's weight, compared to a direct one.
 pub const TRANSITIVE_FACTOR: f64 = 0.25;
+
+/// Whether a donation was one payment or part of a regular one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DonationKind {
+    OneOff,
+    Recurring,
+}
+
+impl DonationKind {
+    pub const ALL: [DonationKind; 2] = [DonationKind::OneOff, DonationKind::Recurring];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DonationKind::OneOff => "one_off",
+            DonationKind::Recurring => "recurring",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DonationKind::OneOff => "one-off",
+            DonationKind::Recurring => "recurring",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<DonationKind> {
+        DonationKind::ALL.into_iter().find(|k| k.as_str() == s)
+    }
+}
+
+/// Where a conversion rate came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FxSource {
+    /// The donation was already in the base currency.
+    Same,
+    /// The European Central Bank's reference rate for that day.
+    Ecb,
+    /// An admin typed it, e.g. what the card was really charged.
+    Manual,
+}
+
+impl FxSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FxSource::Same => "same",
+            FxSource::Ecb => "ecb",
+            FxSource::Manual => "manual",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FxSource::Same => "same currency",
+            FxSource::Ecb => "ECB rate",
+            FxSource::Manual => "entered by hand",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<FxSource> {
+        [FxSource::Same, FxSource::Ecb, FxSource::Manual]
+            .into_iter()
+            .find(|f| f.as_str() == s)
+    }
+}
+
+/// A donation's amount in the base currency, and how it was worked out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Conversion {
+    pub base_minor: i64,
+    /// Units of the base currency per unit of the donated one.
+    pub rate: f64,
+    pub source: FxSource,
+}
+
+/// A donation about to be recorded (already validated).
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewDonation {
+    /// The project's name (its slug).
+    pub project: String,
+    pub platform: String,
+    pub amount_minor: i64,
+    pub currency: String,
+    pub donated_on: jiff::civil::Date,
+    pub kind: DonationKind,
+    pub note: String,
+    /// `None` while the conversion is pending.
+    pub conversion: Option<Conversion>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Donation {
+    pub id: i64,
+    pub project: String,
+    pub project_repo: String,
+    pub platform: String,
+    pub amount_minor: i64,
+    pub currency: String,
+    pub donated_on: jiff::civil::Date,
+    pub conversion: Option<Conversion>,
+    pub kind: DonationKind,
+    pub note: String,
+    pub recorded_by: Actor,
+    pub recorded_at: Timestamp,
+    /// Who voided it and when, if it was.
+    pub voided: Option<(Actor, Timestamp)>,
+}
+
+/// What the donations that count add up to.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Totals {
+    pub count: usize,
+    /// In the base currency; donations still waiting for a conversion are not in it.
+    pub base_minor: i64,
+    pub unconverted: usize,
+    /// In the currencies they were paid in, largest first.
+    pub by_currency: Vec<(String, i64)>,
+    /// In the base currency, newest year first.
+    pub by_year: Vec<(i32, i64)>,
+}

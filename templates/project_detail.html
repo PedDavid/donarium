@@ -43,6 +43,17 @@
   </div>
 
   <div class="flex flex-col gap-3">
+    <div class="flex flex-wrap items-end justify-between gap-2">
+      <div>
+        <h2 class="text-lg font-semibold tracking-tight">Donations</h2>
+        <p class="text-muted-foreground text-sm">{{ project.donation_count }} so far, {{ donated }} in total.</p>
+      </div>
+      {% if layout.admin %}<a class="btn" data-variant="outline" data-size="sm" href="/donations?project={{ project.name }}#record">Record a donation</a>{% endif %}
+    </div>
+    {% include "partials/donations_table.html" %}
+  </div>
+
+  <div class="flex flex-col gap-3">
     <div>
       <h2 class="text-lg font-semibold tracking-tight">Ways to donate</h2>
       <p class="text-muted-foreground text-sm">Donate on the project's own page, then record the donation here.</p>

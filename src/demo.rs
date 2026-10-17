@@ -2,7 +2,10 @@
 
 use jiff::Timestamp;
 
-use crate::model::{Actor, NewSource, Provider, ScanMethod, SourceUpdate};
+use crate::model::{
+    Actor, Conversion, DonationKind, FxSource, NewDonation, NewSource, Provider, ScanMethod,
+    SourceUpdate,
+};
 use crate::scan::image::ImageRef;
 use crate::scan::manifests::{ImageUse, Skipped};
 use crate::scan::usage::Lookup;
@@ -121,7 +124,88 @@ pub async fn seed(store: &Store, now: Timestamp) -> Result<(), StoreError> {
             .await?;
         }
     }
-    seed_images(store, ids[2], now).await
+    seed_images(store, ids[2], now).await?;
+    seed_donations(store, now).await
+}
+
+/// A few donations: in the base currency, in dollars with a rate entered by
+/// hand, and in yen still waiting for a conversion.
+async fn seed_donations(store: &Store, now: Timestamp) -> Result<(), StoreError> {
+    let demo = Actor::new("demo", "demo");
+    let today = now.to_zoned(jiff::tz::TimeZone::UTC).date();
+    let ago = |days: i32| {
+        today
+            .checked_sub(jiff::Span::new().days(days))
+            .expect("a valid demo date")
+    };
+    let eur = |minor: i64| {
+        Some(Conversion {
+            base_minor: minor,
+            rate: 1.0,
+            source: FxSource::Same,
+        })
+    };
+    let donations = [
+        (
+            "tokio-rs-tokio",
+            "github-sponsors",
+            2500,
+            "EUR",
+            ago(400),
+            eur(2500),
+            "",
+        ),
+        (
+            "serde-rs-serde",
+            "opencollective",
+            1000,
+            "USD",
+            ago(90),
+            Some(Conversion {
+                base_minor: 920,
+                rate: 0.92,
+                source: FxSource::Manual,
+            }),
+            "what the card was charged",
+        ),
+        (
+            "bigskysoftware-htmx",
+            "liberapay",
+            500,
+            "EUR",
+            ago(30),
+            eur(500),
+            "",
+        ),
+        (
+            "paperless-ngx-paperless-ngx",
+            "direct",
+            2000,
+            "JPY",
+            ago(12),
+            None,
+            "bank transfer",
+        ),
+    ];
+    for (project, platform, minor, currency, day, conversion, note) in donations {
+        store
+            .record_donation(
+                &NewDonation {
+                    project: project.into(),
+                    platform: platform.into(),
+                    amount_minor: minor,
+                    currency: currency.into(),
+                    donated_on: day,
+                    kind: DonationKind::OneOff,
+                    note: note.into(),
+                    conversion,
+                },
+                &demo,
+                now,
+            )
+            .await?;
+    }
+    Ok(())
 }
 
 /// What an image scan of the GitLab source would have found, including the

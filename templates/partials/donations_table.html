@@ -1,0 +1,50 @@
+{% if donations.is_empty() %}
+<p class="text-sm text-muted-foreground">No donations recorded yet.</p>
+{% else %}
+<div class="table-container rounded-lg border">
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Date</th>
+        {% if show_project %}<th>Project</th>{% endif %}
+        <th>Amount</th>
+        <th class="hidden md:table-cell">Via</th>
+        <th class="hidden lg:table-cell">Note</th>
+        {% if layout.admin %}<th><span class="sr-only">Actions</span></th>{% endif %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for d in donations %}
+      <tr{% if !d.voided.is_empty() %} class="text-muted-foreground"{% endif %}>
+        <td class="whitespace-nowrap">{{ d.date }}</td>
+        {% if show_project %}
+        <td><a href="/projects/{{ d.project }}" class="font-medium hover:underline" title="{{ d.project_repo }}">{{ d.project }}</a></td>
+        {% endif %}
+        <td class="whitespace-nowrap">
+          <span{% if !d.voided.is_empty() %} class="line-through"{% endif %}>{{ d.amount }}</span>
+          {% if !d.base.is_empty() %}<div class="text-xs text-muted-foreground" title="{{ d.base_how }}">{{ d.base }}</div>{% endif %}
+          {% if d.pending %}<div class="text-xs"><span class="badge" data-variant="secondary" title="The amount in the base currency has not been worked out yet">conversion pending</span></div>{% endif %}
+          {% if !d.voided.is_empty() %}<div class="text-xs"><span class="badge" data-variant="destructive">voided</span> {{ d.voided }}</div>{% endif %}
+        </td>
+        <td class="hidden md:table-cell">
+          {{ d.platform }}
+          <div class="text-xs text-muted-foreground">{{ d.kind }}</div>
+        </td>
+        <td class="hidden lg:table-cell break-words max-w-xs">{{ d.note }}<div class="text-xs text-muted-foreground">recorded by {{ d.recorded_by }}</div></td>
+        {% if layout.admin %}
+        <td class="text-end">
+          {% if d.voided.is_empty() %}
+          <form method="post" action="/donations/{{ d.id }}/void">
+            <input type="hidden" name="_csrf" value="{{ layout.csrf }}">
+            <input type="hidden" name="project" value="{{ filter }}">
+            <button type="submit" class="btn" data-variant="ghost" data-size="sm" title="Marks this donation as a mistake. It stays in the history.">Void</button>
+          </form>
+          {% endif %}
+        </td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}

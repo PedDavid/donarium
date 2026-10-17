@@ -259,14 +259,24 @@ Recording flow (admin only):
    original, so history stays auditable.
 
 ```sql
-donation(id, project, platform, amount_minor, currency, donated_at,
-         base_amount_minor NULL, fx_rate NULL, fx_source /* ecb | manual */ NULL,
+donation(id, project_id, platform, amount_minor, currency, donated_on /* a date */,
+         base_amount_minor NULL, fx_rate NULL, fx_source /* same | ecb | manual */ NULL,
          kind /* one_off | recurring */, note, recorded_by, recorded_at,
-         voids_id NULL, receipt_id NULL)
-receipt(id, donation_id, store /* paperless | s3 */, ref /* doc id or key */,
-        url, filename, content_type, sha256 NULL, created_at)
-fx_rate(date, currency, rate_to_base, base)   -- cache of fetched rates
+         voids_id NULL)
+meta(key, value)                                  -- the database's base currency
+fx_rate(date, currency, base, rate, rate_date)    -- cache of fetched rates
 ```
+
+Donations are append-only, enforced by the database and not only by the
+application: triggers refuse any delete, and any update except filling in a
+pending base amount once. A mistake is corrected with a **void entry** (a row
+with `voids_id` set); the donation stays in the history, marked as voided, and
+stops counting. A project with donations cannot be deleted or pruned.
+Amounts are whole minor units (cents), never floats, and a currency's decimal
+places are respected (yen have none, Kuwaiti dinars three). The base currency
+is remembered in `meta` the first time the database is used, and a different
+`--base-currency` is refused, since totals in two currencies would mean nothing.
+Receipts (section 7) arrive with their own table.
 
 A recurring donation repeats as a monthly "expected" entry that you confirm,
 because the app can't see your bank.

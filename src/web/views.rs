@@ -3,7 +3,8 @@
 use jiff::{SignedDuration, Timestamp};
 
 use crate::funding;
-use crate::model::{ForgeHosts, Funding, Origin, Project, Source};
+use crate::model::{Donation, ForgeHosts, Funding, FxSource, Origin, Project, Source, Totals};
+use crate::money::{format_amount, minor_exponent};
 
 pub fn fmt_date(t: Timestamp) -> String {
     t.strftime("%Y-%m-%d").to_string()
@@ -44,6 +45,7 @@ pub struct ProjectRow {
     pub manual: bool,
     pub ignored: bool,
     pub notes: String,
+    pub donation_count: i64,
 }
 
 /// One way to donate, ready to show.
@@ -92,6 +94,7 @@ impl ProjectRow {
             manual: p.origin == Origin::Manual,
             ignored: p.ignored,
             notes: p.notes.clone(),
+            donation_count: p.donation_count,
         }
     }
 
@@ -100,6 +103,115 @@ impl ProjectRow {
         let q = q.to_lowercase();
         self.name.to_lowercase().contains(&q) || self.repo.to_lowercase().contains(&q)
     }
+}
+
+/// `12.50 EUR`.
+pub fn fmt_money(minor: i64, currency: &str) -> String {
+    format!("{} {currency}", format_amount(minor, currency))
+}
+
+/// A donation, ready to show.
+#[derive(Clone, Debug)]
+pub struct DonationRow {
+    pub id: i64,
+    pub date: String,
+    pub project: String,
+    pub project_repo: String,
+    pub platform: String,
+    pub amount: String,
+    /// In the base currency, when that differs from what was paid and is known.
+    pub base: String,
+    /// How the base amount was worked out, for a tooltip.
+    pub base_how: String,
+    /// The conversion to the base currency has not happened yet.
+    pub pending: bool,
+    pub kind: &'static str,
+    pub note: String,
+    pub recorded_by: String,
+    /// "bob, 2026-10-01", if it was voided.
+    pub voided: String,
+}
+
+impl DonationRow {
+    pub fn new(d: &Donation, base_currency: &str) -> DonationRow {
+        let (base, base_how, pending) = match &d.conversion {
+            None => (String::new(), String::new(), d.currency != base_currency),
+            Some(c) if c.source == FxSource::Same => (String::new(), String::new(), false),
+            Some(c) => (
+                format!("≈ {}", fmt_money(c.base_minor, base_currency)),
+                format!(
+                    "{}: 1 {} = {} {base_currency}",
+                    c.source.label(),
+                    d.currency,
+                    fmt_rate(c.rate)
+                ),
+                false,
+            ),
+        };
+        DonationRow {
+            id: d.id,
+            date: d.donated_on.to_string(),
+            project: d.project.clone(),
+            project_repo: d.project_repo.clone(),
+            platform: funding::display_name(&d.platform).to_string(),
+            amount: fmt_money(d.amount_minor, &d.currency),
+            base,
+            base_how,
+            pending,
+            kind: d.kind.label(),
+            note: d.note.clone(),
+            recorded_by: d.recorded_by.to_string(),
+            voided: d
+                .voided
+                .as_ref()
+                .map(|(by, at)| format!("{by}, {}", fmt_date(*at)))
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// "0.923", "160", "0.0061": up to six decimals, no trailing zeros.
+pub fn fmt_rate(rate: f64) -> String {
+    let text = format!("{rate:.6}");
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// Totals, ready to show.
+#[derive(Clone, Debug, Default)]
+pub struct TotalsView {
+    pub count: usize,
+    pub base: String,
+    pub unconverted: usize,
+    pub by_currency: Vec<(String, String)>,
+    /// Worth showing: some donation was paid in a currency other than the base.
+    pub show_as_paid: bool,
+    pub by_year: Vec<(i32, String)>,
+}
+
+impl TotalsView {
+    pub fn new(t: &Totals, base_currency: &str) -> TotalsView {
+        TotalsView {
+            count: t.count,
+            base: fmt_money(t.base_minor, base_currency),
+            unconverted: t.unconverted,
+            by_currency: t
+                .by_currency
+                .iter()
+                .map(|(c, minor)| (c.clone(), fmt_money(*minor, c)))
+                .collect(),
+            show_as_paid: t.by_currency.iter().any(|(c, _)| c != base_currency),
+            by_year: t
+                .by_year
+                .iter()
+                .map(|(y, minor)| (*y, fmt_money(*minor, base_currency)))
+                .collect(),
+        }
+    }
+}
+
+/// The base currency's smallest unit as a decimal, for metrics: `0.01`.
+pub fn minor_to_major(minor: i64, currency: &str) -> f64 {
+    minor as f64 / 10f64.powi(minor_exponent(currency) as i32)
 }
 
 /// A source turned into pre-formatted fields for the templates.
@@ -158,6 +270,18 @@ pub fn fmt_weight(w: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn money_and_rates_are_formatted() {
+        assert_eq!(fmt_money(1250, "EUR"), "12.50 EUR");
+        assert_eq!(fmt_money(1500, "JPY"), "1500 JPY");
+        assert_eq!(fmt_rate(0.923), "0.923");
+        assert_eq!(fmt_rate(160.0), "160");
+        assert_eq!(fmt_rate(0.0061), "0.0061");
+        assert_eq!(fmt_rate(0.9230004), "0.923");
+        assert_eq!(minor_to_major(1250, "EUR"), 12.5);
+        assert_eq!(minor_to_major(1500, "JPY"), 1500.0);
+    }
 
     #[test]
     fn relative_dates_are_coarse() {

@@ -33,6 +33,10 @@ async fn main() -> anyhow::Result<()> {
             .await
             .with_context(|| format!("opening {}", cfg.database_url))?
     };
+    store
+        .ensure_base_currency(&cfg.base_currency)
+        .await
+        .context("checking the base currency")?;
     let store = Arc::new(store);
     let scanner = Arc::new(build_scanner(&cfg, store.clone())?);
     if !cfg.demo && cfg.scan_interval.is_positive() {
@@ -46,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
     let auth = AuthMode::from_config(&cfg.auth, &cfg.public_url, demo_dev_auth)?;
     let cookie_key = load_cookie_key(&cfg)?;
 
-    let ops = web::ops_router(store.clone(), metrics);
+    let ops = web::ops_router(store.clone(), metrics, cfg.base_currency.clone());
     let state = AppState::new(cfg.clone(), store, scanner, auth, cookie_key);
     let app = web::router(state);
 
