@@ -255,6 +255,10 @@ pub fn router(state: AppState) -> Router {
         .route("/projects/{name}/delete", post(projects::delete))
         .route("/projects/{name}/funding", post(projects::add_funding))
         .route(
+            "/projects/{name}/funding/discover",
+            post(projects::discover_funding),
+        )
+        .route(
             "/projects/{name}/funding/delete",
             post(projects::remove_funding),
         )
