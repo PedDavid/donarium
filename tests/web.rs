@@ -2208,3 +2208,112 @@ async fn setting_a_rate_needs_admin_csrf_and_origin() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
+
+mod funding_discovery {
+    use super::*;
+    use common::harness_args;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn an_admin_looks_up_a_projects_funding_file() {
+        let github = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/repos/prometheus/prometheus/contents/.github/FUNDING.yml",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string("open_collective: prometheus\n"),
+            )
+            .mount(&github)
+            .await;
+        let h = harness_args(false, &["--github-api-url", &github.uri()]).await;
+        let admin = session_cookie(&h.key, &session(true));
+        let user = session_cookie(&h.key, &session(false));
+        let page = "/projects/prometheus-prometheus";
+
+        // Only admins see the button.
+        let html = body(h.app.clone().oneshot(get(page, &admin)).await.unwrap()).await;
+        assert!(html.contains("Look for them on GitHub"));
+        let html = body(h.app.clone().oneshot(get(page, &user)).await.unwrap()).await;
+        assert!(!html.contains("Look for them on GitHub"));
+        let res = h
+            .app
+            .clone()
+            .oneshot(post(
+                &format!("{page}/funding/discover"),
+                &user,
+                &[("_csrf", "csrf-token")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        let res = h
+            .app
+            .clone()
+            .oneshot(post(
+                &format!("{page}/funding/discover"),
+                &admin,
+                &[("_csrf", "csrf-token")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            res.headers()[header::LOCATION],
+            "/projects/prometheus-prometheus?notice=funding-found"
+        );
+        let html = body(h.app.clone().oneshot(get(page, &user)).await.unwrap()).await;
+        assert!(html.contains("https://opencollective.com/prometheus"));
+        assert!(html.contains("FUNDING.yml"));
+    }
+
+    #[tokio::test]
+    async fn without_github_access_there_is_no_button_and_a_failure_is_reported() {
+        let h = harness(false).await;
+        let admin = session_cookie(&h.key, &session(true));
+        // The default harness has no GitHub access for this: no finder.
+        let html = body(
+            h.app
+                .clone()
+                .oneshot(get("/projects/prometheus-prometheus", &admin))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(!html.contains("Look for them on GitHub"));
+
+        let github = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&github)
+            .await;
+        let h = harness_args(false, &["--github-api-url", &github.uri()]).await;
+        let admin = session_cookie(&h.key, &session(true));
+        let res = h
+            .app
+            .oneshot(post(
+                "/projects/prometheus-prometheus/funding/discover",
+                &admin,
+                &[("_csrf", "csrf-token")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+        assert!(body(res).await.contains("GitHub answered"));
+    }
+
+    #[tokio::test]
+    async fn the_scheduled_pass_stops_when_github_rate_limits() {
+        let github = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&github)
+            .await;
+        let h = harness_args(false, &["--github-api-url", &github.uri()]).await;
+        h.scanner.discover_funding_pass().await;
+        // One request was made, not one per project.
+        assert_eq!(github.received_requests().await.unwrap().len(), 1);
+    }
+}

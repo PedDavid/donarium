@@ -16,6 +16,7 @@ use crate::model::{
     Actor, Conversion, Donation, DonationKind, Funding, FxSource, NewDonation, NewSource, Origin,
     Project, ProjectUpdate, Provider, ScanMethod, Source, SourceUpdate, TRANSITIVE_FACTOR, Totals,
 };
+use crate::scan::funding::Found;
 use crate::scan::manifests::{ImageUse, Skipped};
 use crate::scan::resolve::slug;
 use crate::scan::usage::{Lookup, Resolved, resolve};
@@ -1056,6 +1057,65 @@ impl Store {
         Ok(())
     }
 
+    /// Replaces what was discovered for a project's funding with `found`,
+    /// leaving what an admin added alone, and notes that it was checked.
+    pub async fn set_discovered_funding(
+        &self,
+        name: &str,
+        found: &[Found],
+        now: Timestamp,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let id = project_id(&mut tx, name).await?;
+        sqlx::query("DELETE FROM project_funding WHERE project_id = ? AND origin = 'discovered'")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        for f in found {
+            // A manual entry for the same handle wins.
+            sqlx::query(
+                "INSERT OR IGNORE INTO project_funding (project_id, platform, handle, url, origin)
+                 VALUES (?, ?, ?, ?, 'discovered')",
+            )
+            .bind(id)
+            .bind(&f.platform)
+            .bind(&f.handle)
+            .bind(&f.url)
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query("UPDATE project SET funding_checked_at = ? WHERE id = ?")
+            .bind(now.to_string())
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// GitHub projects whose funding was never looked up, or not since
+    /// `before`, oldest check first: `(name, repo)`.
+    pub async fn projects_to_check_for_funding(
+        &self,
+        before: Timestamp,
+        limit: i64,
+    ) -> Result<Vec<(String, String)>, StoreError> {
+        sqlx::query(
+            "SELECT name, repo FROM project
+              WHERE repo LIKE 'github.com/%'
+                AND (funding_checked_at IS NULL OR funding_checked_at < ?)
+              ORDER BY funding_checked_at IS NOT NULL, funding_checked_at, name
+              LIMIT ?",
+        )
+        .bind(before.to_string())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|r| Ok((r.try_get("name")?, r.try_get("repo")?)))
+        .collect()
+    }
+
     /// Removes a way to donate that was added by hand.
     pub async fn remove_funding(
         &self,
@@ -1915,6 +1975,110 @@ mod tests {
             .execute(store.pool())
             .await;
         assert!(other.is_err());
+    }
+
+    #[tokio::test]
+    async fn discovered_funding_replaces_only_what_was_discovered() {
+        let store = store_with_project().await;
+        let found = |platform: &str, handle: &str| Found {
+            platform: platform.into(),
+            handle: handle.into(),
+            url: None,
+        };
+        let before = store
+            .get_project("tokio-rs-tokio")
+            .await
+            .unwrap()
+            .unwrap()
+            .funding
+            .len();
+        store
+            .add_funding("tokio-rs-tokio", "liberapay", "mine", None)
+            .await
+            .unwrap();
+        store
+            .set_discovered_funding(
+                "tokio-rs-tokio",
+                &[found("opencollective", "tokio"), found("liberapay", "mine")],
+                now(),
+            )
+            .await
+            .unwrap();
+        let funding = store
+            .get_project("tokio-rs-tokio")
+            .await
+            .unwrap()
+            .unwrap()
+            .funding;
+        assert_eq!(funding.len(), before + 2);
+        // The hand-added entry stays manual even though it was also found.
+        assert!(funding.iter().find(|f| f.handle == "mine").unwrap().manual);
+        assert!(!funding.iter().find(|f| f.handle == "tokio").unwrap().manual);
+
+        // Looking again replaces what was found, and keeps what was added.
+        store
+            .set_discovered_funding("tokio-rs-tokio", &[found("kofi", "tokio")], now())
+            .await
+            .unwrap();
+        let funding = store
+            .get_project("tokio-rs-tokio")
+            .await
+            .unwrap()
+            .unwrap()
+            .funding;
+        assert!(
+            funding
+                .iter()
+                .all(|f| f.handle != "tokio" || f.platform == "kofi")
+        );
+        assert!(funding.iter().any(|f| f.handle == "mine" && f.manual));
+        assert!(matches!(
+            store.set_discovered_funding("nope", &[], now()).await,
+            Err(StoreError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn projects_are_checked_for_funding_when_never_or_long_ago() {
+        let store = store_with_project().await;
+        let long_ago: Timestamp = "2026-01-01T00:00:00Z".parse().unwrap();
+        let cutoff: Timestamp = "2026-06-01T00:00:00Z".parse().unwrap();
+        let due = store
+            .projects_to_check_for_funding(cutoff, 10)
+            .await
+            .unwrap();
+        assert!(
+            due.iter()
+                .any(|(n, r)| n == "tokio-rs-tokio" && r == "github.com/tokio-rs/tokio")
+        );
+        assert!(due.iter().all(|(_, r)| r.starts_with("github.com/")));
+        store
+            .set_discovered_funding("tokio-rs-tokio", &[], now())
+            .await
+            .unwrap();
+        // now() is after the cutoff, so it is not due again.
+        let due = store
+            .projects_to_check_for_funding(cutoff, 10)
+            .await
+            .unwrap();
+        assert!(due.iter().all(|(n, _)| n != "tokio-rs-tokio"));
+        // A check from long ago is due again.
+        store
+            .set_discovered_funding("tokio-rs-tokio", &[], long_ago)
+            .await
+            .unwrap();
+        let due = store
+            .projects_to_check_for_funding(cutoff, 10)
+            .await
+            .unwrap();
+        assert!(due.iter().any(|(n, _)| n == "tokio-rs-tokio"));
+        assert!(
+            store
+                .projects_to_check_for_funding(cutoff, 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

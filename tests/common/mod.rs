@@ -92,7 +92,10 @@ async fn harness_with(
     let key = Key::generate();
     // Without mocks there is no GitLab fetcher: scans report that they are
     // not available.
-    let scanner = Arc::new(match mocks {
+    let finder = extra.contains(&"--github-api-url").then(|| {
+        donarium::scan::funding::FundingFinder::new(cfg.github_api_url.clone(), None).unwrap()
+    });
+    let scanner = match mocks {
         Some((gitlab, registry)) => Scanner::new(
             store.clone(),
             vec![(
@@ -102,6 +105,10 @@ async fn harness_with(
             RegistryClient::for_tests(&registry),
         ),
         None => Scanner::new(store.clone(), vec![], RegistryClient::new(vec![]).unwrap()),
+    };
+    let scanner = Arc::new(match finder {
+        Some(finder) => scanner.with_funding_finder(finder),
+        None => scanner,
     });
     // Without a mock there is no rate service: foreign donations stay pending.
     let fx = Fx::new(

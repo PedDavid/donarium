@@ -59,6 +59,16 @@ donation keeps what was paid, exactly, in the currency it was paid in.
     truth; it is not tax advice.
 - `--step-up-max-age` makes recording and voiding require a recent login.
 
+## Finding how to donate
+
+For GitHub projects Donarium reads the `.github/FUNDING.yml` the project (or its
+account's `.github` repository) publishes, and lists what it declares: GitHub
+Sponsors, Open Collective, Ko-fi, Liberapay, Patreon, thanks.dev, `custom` links
+(https only) and a few link-only platforms. An admin can ask for it on a
+project's page; after each scheduled scan, up to 20 projects not checked for a
+week are looked up too, stopping when GitHub rate limits. What is found is
+replaced on each lookup; what an admin added by hand is never touched.
+
 ## Scanning
 
 A source with the scan method `images` (or `auto`) is scanned for the container

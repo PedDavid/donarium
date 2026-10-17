@@ -9,6 +9,7 @@ use jiff::{SignedDuration, Timestamp};
 use tracing::{info, warn};
 
 use super::fetch::ArchiveFetcher;
+use super::funding::{FinderError, FundingFinder};
 use super::image::ImageRef;
 use super::manifests::scan_files;
 use super::registry::{LookupError, RegistryClient};
@@ -47,6 +48,8 @@ pub struct Scanner {
     store: Arc<Store>,
     fetchers: HashMap<Provider, ArchiveFetcher>,
     registry: RegistryClient,
+    /// Looks up how projects ask to be funded, if GitHub can be asked.
+    finder: Option<FundingFinder>,
     running: Mutex<HashSet<i64>>,
 }
 
@@ -64,6 +67,16 @@ impl Drop for Running<'_> {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum FindFundingError {
+    #[error("looking up funding is not available")]
+    NotConfigured,
+    #[error(transparent)]
+    Finder(#[from] FinderError),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+}
+
 impl Scanner {
     /// `fetchers` has one entry per provider this server can read.
     pub fn new(
@@ -75,7 +88,62 @@ impl Scanner {
             store,
             fetchers: fetchers.into_iter().collect(),
             registry,
+            finder: None,
             running: Mutex::new(HashSet::new()),
+        }
+    }
+
+    pub fn with_funding_finder(mut self, finder: FundingFinder) -> Scanner {
+        self.finder = Some(finder);
+        self
+    }
+
+    /// Whether FUNDING.yml files can be looked up.
+    pub fn can_find_funding(&self) -> bool {
+        self.finder.is_some()
+    }
+
+    /// Looks up how `repo` asks to be funded and stores it under `project`.
+    /// Returns how many ways to donate it declares.
+    pub async fn discover_funding(
+        &self,
+        project: &str,
+        repo: &str,
+    ) -> Result<usize, FindFundingError> {
+        let finder = self
+            .finder
+            .as_ref()
+            .ok_or(FindFundingError::NotConfigured)?;
+        let found = finder.find(repo).await?;
+        self.store
+            .set_discovered_funding(project, &found, Timestamp::now())
+            .await?;
+        Ok(found.len())
+    }
+
+    /// Looks up the funding of the projects not checked for a week, a few at a
+    /// time so GitHub's rate limit is respected, and stops when it is reached.
+    pub async fn discover_funding_pass(&self) {
+        if self.finder.is_none() {
+            return;
+        }
+        let cutoff = Timestamp::now() - SignedDuration::from_hours(24 * 7);
+        let due = match self.store.projects_to_check_for_funding(cutoff, 20).await {
+            Ok(due) => due,
+            Err(e) => {
+                warn!(error = %e, "listing projects to look up funding for failed");
+                return;
+            }
+        };
+        for (name, repo) in due {
+            match self.discover_funding(&name, &repo).await {
+                Ok(n) => info!(project = %name, found = n, "looked up funding"),
+                Err(FindFundingError::Finder(FinderError::RateLimited)) => {
+                    warn!("GitHub is rate limiting funding lookups; trying again later");
+                    return;
+                }
+                Err(e) => warn!(project = %name, error = %e, "looking up funding failed"),
+            }
         }
     }
 
@@ -278,6 +346,7 @@ pub fn spawn_scheduler(scanner: Arc<Scanner>, every: Duration) {
         tokio::time::sleep(Duration::from_secs(30)).await;
         loop {
             scanner.scan_all().await;
+            scanner.discover_funding_pass().await;
             tokio::time::sleep(every).await;
         }
     });
