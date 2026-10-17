@@ -6,6 +6,7 @@ pub mod fx;
 pub mod metrics;
 pub mod model;
 pub mod money;
+pub mod receipts;
 pub mod scan;
 pub mod store;
 pub mod validation;

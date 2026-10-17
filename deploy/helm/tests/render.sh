@@ -71,6 +71,18 @@ env=$(yq 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env'
 [[ -z $(yq 'select(.kind == "Deployment") | .spec.template.spec.volumes[] | select(.name == "gitea-token")' <<<"$out") ]] \
   || fail "a Gitea token Secret is mounted without a URL"
 
+# Paperless: both the URL and the token Secret are needed, and then both are passed.
+out=$(render --set paperless.url=https://paperless.example.com --set paperless.tokenSecret.existingSecret=pl)
+env=$(yq 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env' <<<"$out")
+[[ $(yq '.[] | select(.name == "DONARIUM_PAPERLESS_URL") | .value' <<<"$env") == https://paperless.example.com ]] || fail "the Paperless URL is not passed"
+[[ $(yq '.[] | select(.name == "DONARIUM_PAPERLESS_TOKEN_FILE") | .value' <<<"$env") == /etc/donarium/paperless/token ]] || fail "the Paperless token file is not passed"
+[[ $(yq 'select(.kind == "Deployment") | .spec.template.spec.volumes[] | select(.name == "paperless-token") | .secret.secretName' <<<"$out") == pl ]] || fail "the Paperless Secret is not mounted"
+for partial in "--set paperless.url=https://paperless.example.com" "--set paperless.tokenSecret.existingSecret=pl"; do
+  out=$(render $partial)
+  [[ -z $(yq 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env[] | select(.name == "DONARIUM_PAPERLESS_URL" or .name == "DONARIUM_PAPERLESS_TOKEN_FILE")' <<<"$out") ]] \
+    || fail "Paperless is half configured ($partial)"
+done
+
 # The base currency reaches the container, EUR unless set.
 env=$(render | yq 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env')
 [[ $(yq '.[] | select(.name == "DONARIUM_BASE_CURRENCY") | .value' <<<"$env") == EUR ]] || fail "the base currency default is not EUR"

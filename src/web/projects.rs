@@ -290,7 +290,7 @@ async fn render_detail(
         .map(|(id, label)| (*id, *label, *id == funding_values.platform))
         .collect();
     let base = &ctx.state.inner.cfg.base_currency;
-    let donations = ctx
+    let mut donations: Vec<DonationRow> = ctx
         .state
         .inner
         .store
@@ -299,6 +299,7 @@ async fn render_detail(
         .iter()
         .map(|d| DonationRow::new(d, base))
         .collect();
+    super::receipts::attach(ctx.state, &mut donations).await?;
     let donated = fmt_money(project.donated_base_minor, base);
     let page = DetailPage {
         layout: Layout::new(ctx.state, ctx.session, ctx.jar, project.name.clone()),

@@ -70,7 +70,12 @@ async fn main() -> anyhow::Result<()> {
     let cookie_key = load_cookie_key(&cfg)?;
 
     let ops = web::ops_router(store.clone(), metrics, cfg.base_currency.clone());
-    let state = AppState::new(cfg.clone(), store, scanner, fx, auth, cookie_key);
+    let mut state = AppState::new(cfg.clone(), store, scanner, fx, auth, cookie_key);
+    if let (Some(url), Some(token)) = (&cfg.paperless_url, read_token(&cfg.paperless_token_file)?) {
+        let paperless = donarium::receipts::Paperless::new(url.clone(), token)
+            .context("building the Paperless client")?;
+        state = state.with_paperless(paperless);
+    }
     let app = web::router(state);
 
     let ui_listener = tokio::net::TcpListener::bind(cfg.listen).await?;
