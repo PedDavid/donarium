@@ -17,14 +17,14 @@
     <section>
       <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 text-sm">
         <dt class="text-muted-foreground">Total</dt>
-        <dd class="font-medium">{{ totals.base }} <span class="text-muted-foreground font-normal">in {{ totals.count }} donation(s)</span></dd>
+        <dd class="font-medium">{{ totals.base }} <span class="text-muted-foreground font-normal">in {{ totals.count }} donation(s)</span> · <a class="underline underline-offset-4 font-normal" href="/donations/export.csv">Download CSV</a></dd>
         {% if totals.unconverted > 0 %}
         <dt class="text-muted-foreground">Pending</dt>
         <dd>{{ totals.unconverted }} donation(s) are not in this total yet: their amount in {{ base_currency }} is not known.</dd>
         {% endif %}
         {% if !totals.by_year.is_empty() %}
         <dt class="text-muted-foreground">By year</dt>
-        <dd>{% for y in totals.by_year %}{{ y.0 }}: {{ y.1 }}{% if !loop.last %} · {% endif %}{% endfor %}</dd>
+        <dd>{% for y in totals.by_year %}{{ y.0 }}: {{ y.1 }} (<a class="underline underline-offset-4" href="/donations/export.csv?year={{ y.0 }}" title="Download {{ y.0 }} as CSV">CSV</a>){% if !loop.last %} · {% endif %}{% endfor %}</dd>
         {% endif %}
         {% if totals.show_as_paid %}
         <dt class="text-muted-foreground">As paid</dt>

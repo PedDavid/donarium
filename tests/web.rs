@@ -2208,3 +2208,63 @@ async fn setting_a_rate_needs_admin_csrf_and_origin() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn donations_download_as_csv_for_a_year() {
+    let h = harness(false).await;
+    let user = session_cookie(&h.key, &session(false));
+    let res = h
+        .app
+        .clone()
+        .oneshot(get("/donations/export.csv", &user))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()[header::CONTENT_TYPE],
+        "text/csv; charset=utf-8"
+    );
+    assert_eq!(
+        res.headers()[header::CONTENT_DISPOSITION],
+        "attachment; filename=\"donarium-donations.csv\""
+    );
+    let all = body(res).await;
+    assert!(all.starts_with("date,project,"));
+    assert_eq!(
+        all.matches("\r\n").count(),
+        1 + 4,
+        "the header and 4 donations"
+    );
+
+    let res = h
+        .app
+        .clone()
+        .oneshot(get("/donations/export.csv?year=1999", &user))
+        .await
+        .unwrap();
+    assert_eq!(
+        res.headers()[header::CONTENT_DISPOSITION],
+        "attachment; filename=\"donarium-donations-1999.csv\""
+    );
+    assert_eq!(body(res).await.matches("\r\n").count(), 1);
+
+    let res = h
+        .app
+        .clone()
+        .oneshot(get("/donations/export.csv?year=abc", &user))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // Logged-out visitors are sent to log in.
+    let res = h
+        .app
+        .oneshot(
+            Request::get("/donations/export.csv")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(res.status(), StatusCode::OK);
+}
