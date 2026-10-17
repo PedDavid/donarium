@@ -349,6 +349,9 @@ pub trait ReceiptStore: Send + Sync {
   the chosen document exists, and stores its id and title in `receipt`. The
   Paperless token is sent only to the configured server and redirects are not
   followed. Documents open in Paperless's own UI (`link` mode).
+- **S3 built:** upload on the same page (`--s3-*` flags, Helm `s3.*`), type
+  checked by magic bytes, 10 MB cap, sanitised names, presigned five-minute
+  downloads behind login. Objects are kept when a receipt is unlinked.
 - **S3 (upload).** For receipts that exist nowhere else (a PDF from a donation
   page). Uploaded to `<bucket>/<year>/<donation-id>/<filename>` with SSE and a
   SHA-256, served through short-lived presigned URLs after an OIDC check.
