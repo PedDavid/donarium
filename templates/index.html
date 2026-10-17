@@ -1,10 +1,17 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="flex flex-col gap-6">
+  {% if !notice.is_empty() %}
+  <div class="alert" role="status">
+    {% include "icons/circle-check.svg" %}
+    <h2>{{ notice }}</h2>
+  </div>
+  {% endif %}
+
   <div class="flex flex-wrap items-end justify-between gap-4">
     <div>
       <h1 class="text-2xl font-semibold tracking-tight">Projects</h1>
-      <p class="text-muted-foreground text-sm">The open-source projects you depend on.</p>
+      <p class="text-muted-foreground text-sm">The open-source projects you depend on or want to support. Scans of your sources find them; {% if layout.admin %}you can also add one yourself below{% else %}an admin can also add one by hand{% endif %}.</p>
     </div>
   </div>
 
@@ -19,5 +26,52 @@
   <div id="projects-table">
     {% include "partials/projects_table.html" %}
   </div>
+
+  {% if !ignored.is_empty() %}
+  <details class="w-full rounded-lg border p-4">
+    <summary class="cursor-pointer text-sm font-medium">{{ ignored.len() }} ignored project(s)</summary>
+    <p class="mt-2 text-sm text-muted-foreground">Left out of the list above, for example because they are backed by a company.</p>
+    <ul class="mt-3 flex flex-col gap-1 text-sm">
+      {% for row in ignored %}
+      <li><a href="/projects/{{ row.name }}" class="hover:underline">{{ row.name }}</a> <span class="text-muted-foreground">{{ row.repo }}</span></li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+
+  {% if layout.admin %}
+  <form method="post" action="/projects" class="card w-full sm:max-w-xl" autocomplete="off">
+    <input type="hidden" name="_csrf" value="{{ layout.csrf }}">
+    <header>
+      <h2>Add a project</h2>
+      <p>For a project that no scan finds, such as an application you run.</p>
+    </header>
+    <section class="flex flex-col gap-4">
+      {% if !error.is_empty() %}
+      <div class="alert" data-variant="destructive" role="alert">
+        {% include "icons/triangle-alert.svg" %}
+        <h2>{{ error }}</h2>
+      </div>
+      {% endif %}
+      <div class="field">
+        <label for="repo">Repository</label>
+        <input id="repo" type="text" name="repo" value="{{ form.repo }}" placeholder="github.com/owner/name" required spellcheck="false">
+        <p>Including the host, e.g. <code>github.com/paperless-ngx/paperless-ngx</code>.</p>
+      </div>
+      <div class="field">
+        <label for="usage">How much you use it</label>
+        <input id="usage" type="text" inputmode="decimal" name="usage" value="{{ form.usage }}" required>
+        <p>Usage you assign yourself, 0 to 1000. Compare with the scores in the list.</p>
+      </div>
+      <div class="field">
+        <label for="notes">Notes <span class="text-muted-foreground">(optional)</span></label>
+        <textarea id="notes" class="textarea" name="notes" rows="2">{{ form.notes }}</textarea>
+      </div>
+    </section>
+    <footer>
+      <button type="submit" class="btn">Add project</button>
+    </footer>
+  </form>
+  {% endif %}
 </div>
 {% endblock %}

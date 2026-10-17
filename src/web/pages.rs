@@ -1,8 +1,8 @@
 //! Page handlers.
 
 use askama::Template;
-use axum::extract::{Path, Query, State};
-use axum::http::HeaderMap;
+use axum::extract::{Query, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum_extra::extract::CookieJar;
 use serde::Deserialize;
@@ -60,29 +60,45 @@ impl Layout {
     }
 }
 
+/// What a handler needs to render a page.
+pub(super) struct Ctx<'a> {
+    pub state: &'a AppState,
+    pub session: &'a Session,
+    pub jar: &'a CookieJar,
+}
+
+/// What a page says about the request that led to it.
+pub(super) struct Feedback {
+    pub error: String,
+    pub notice: &'static str,
+    pub status: StatusCode,
+}
+
+impl Feedback {
+    pub fn ok(notice: &'static str) -> Feedback {
+        Feedback {
+            error: String::new(),
+            notice,
+            status: StatusCode::OK,
+        }
+    }
+
+    pub fn rejected(error: impl Into<String>, status: StatusCode) -> Feedback {
+        Feedback {
+            error: error.into(),
+            notice: "",
+            status,
+        }
+    }
+}
+
 #[derive(Deserialize, Default, Clone)]
 pub struct Filters {
     #[serde(default)]
     pub q: String,
 }
 
-#[derive(Template)]
-#[template(path = "index.html")]
-struct IndexPage {
-    layout: Layout,
-    rows: Vec<ProjectRow>,
-    total: usize,
-    filters: Filters,
-}
-
-#[derive(Template)]
-#[template(path = "partials/projects_table.html")]
-struct ProjectsTable {
-    rows: Vec<ProjectRow>,
-    total: usize,
-}
-
-fn is_htmx(headers: &HeaderMap, target: &str) -> bool {
+pub(super) fn is_htmx(headers: &HeaderMap, target: &str) -> bool {
     headers.contains_key("hx-request")
         && headers
             .get("hx-target")
@@ -90,7 +106,7 @@ fn is_htmx(headers: &HeaderMap, target: &str) -> bool {
             .is_some_and(|t| t == target)
 }
 
-async fn rows(state: &AppState, q: &str) -> Result<(Vec<ProjectRow>, usize), AppError> {
+pub(super) async fn rows(state: &AppState, q: &str) -> Result<(Vec<ProjectRow>, usize), AppError> {
     let now = state.now();
     let all: Vec<ProjectRow> = state
         .inner
@@ -106,29 +122,6 @@ async fn rows(state: &AppState, q: &str) -> Result<(Vec<ProjectRow>, usize), App
         .filter(|r| q.is_empty() || r.matches(q))
         .collect();
     Ok((rows, total))
-}
-
-pub async fn index(
-    State(state): State<AppState>,
-    User(session): User,
-    jar: CookieJar,
-    headers: HeaderMap,
-    Query(filters): Query<Filters>,
-) -> Result<Response, AppError> {
-    let (rows, total) = rows(&state, &filters.q).await?;
-    if is_htmx(&headers, "projects-table") {
-        return Ok(Html(ProjectsTable { rows, total }.render()?).into_response());
-    }
-    Ok(Html(
-        IndexPage {
-            layout: Layout::new(&state, &session, &jar, "Projects"),
-            rows,
-            total,
-            filters,
-        }
-        .render()?,
-    )
-    .into_response())
 }
 
 #[derive(Template)]
@@ -152,34 +145,4 @@ pub async fn search(
     let (mut rows, _) = rows(&state, &query.q).await?;
     rows.truncate(8);
     Ok(Html(SearchResults { rows }.render()?).into_response())
-}
-
-#[derive(Template)]
-#[template(path = "detail.html")]
-struct DetailPage {
-    layout: Layout,
-    project: ProjectRow,
-}
-
-pub async fn detail(
-    State(state): State<AppState>,
-    User(session): User,
-    jar: CookieJar,
-    Path(name): Path<String>,
-) -> Result<Response, AppError> {
-    let project = state
-        .inner
-        .store
-        .get_project(&name)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("no project named {name:?}")))?;
-    let row = ProjectRow::new(&project, state.now());
-    Ok(Html(
-        DetailPage {
-            layout: Layout::new(&state, &session, &jar, row.name.clone()),
-            project: row,
-        }
-        .render()?,
-    )
-    .into_response())
 }

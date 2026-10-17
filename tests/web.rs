@@ -1025,3 +1025,389 @@ async fn gitea_sources_use_the_configured_host() {
     // The scan section names the missing fetcher: the harness reads no server.
     assert!(html.contains("no Gitea or Forgejo server is configured"));
 }
+
+// --- projects added by hand ---
+
+fn add_project_form(csrf: &str, repo: &str, usage: &str, notes: &str) -> Vec<(String, String)> {
+    [
+        ("_csrf", csrf),
+        ("repo", repo),
+        ("usage", usage),
+        ("notes", notes),
+    ]
+    .iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect()
+}
+
+fn pairs(v: &[(String, String)]) -> Vec<(&str, &str)> {
+    v.iter().map(|(k, x)| (k.as_str(), x.as_str())).collect()
+}
+
+#[tokio::test]
+async fn admins_add_a_project_by_hand() {
+    let h = harness(false).await;
+    let admin = session_cookie(&h.key, &session(true));
+    let form = add_project_form(
+        "csrf-token",
+        "https://github.com/Immich-App/immich",
+        "3",
+        "runs my photos",
+    );
+    let res = h
+        .app
+        .clone()
+        .oneshot(post("/projects", &admin, &pairs(&form)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers()[header::LOCATION],
+        "/projects/immich-app-immich?notice=created"
+    );
+    let project = h
+        .store
+        .get_project("immich-app-immich")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(project.repo, "github.com/immich-app/immich");
+    assert_eq!(project.usage_score, 3.0);
+
+    let res = h
+        .app
+        .clone()
+        .oneshot(get("/projects/immich-app-immich?notice=created", &admin))
+        .await
+        .unwrap();
+    let html = body(res).await;
+    assert!(html.contains("Project added."));
+    assert!(html.contains("added by hand"));
+    assert!(html.contains("runs my photos"));
+    assert!(html.contains("Delete this project"));
+
+    // It is in the list, marked as added by hand.
+    let res = h.app.oneshot(get("/", &admin)).await.unwrap();
+    let html = body(res).await;
+    assert!(html.contains("immich-app-immich"));
+    assert!(html.contains("added by hand"));
+}
+
+#[tokio::test]
+async fn bad_projects_are_rejected_with_a_message() {
+    let h = harness(false).await;
+    let admin = session_cookie(&h.key, &session(true));
+    let before = h.store.list_projects().await.unwrap().len();
+    for (repo, usage, notes, message) in [
+        ("tokio-rs/tokio", "1", "", "host/owner/name"),
+        ("", "1", "", "host/owner/name"),
+        ("github.com/a/b", "lots", "", "must be a number"),
+        ("github.com/a/b", "-1", "", "between 0 and 1000"),
+        ("github.com/a/b", "1", &"x".repeat(1001), "too long"),
+    ] {
+        let form = add_project_form("csrf-token", repo, usage, notes);
+        let res = h
+            .app
+            .clone()
+            .oneshot(post("/projects", &admin, &pairs(&form)))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{repo} {usage}"
+        );
+        assert!(body(res).await.contains(message), "{repo} {usage}");
+    }
+    // An existing repository is a conflict, whichever way it is written.
+    let form = add_project_form("csrf-token", "GITHUB.com/Tokio-rs/tokio", "1", "");
+    let res = h
+        .app
+        .oneshot(post("/projects", &admin, &pairs(&form)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    assert_eq!(h.store.list_projects().await.unwrap().len(), before);
+}
+
+#[tokio::test]
+async fn project_changes_need_admin_csrf_and_origin() {
+    let h = harness(false).await;
+    let admin = session_cookie(&h.key, &session(true));
+    let reader = session_cookie(&h.key, &session(false));
+    let name = "bigskysoftware-htmx";
+    let before = h.store.get_project(name).await.unwrap().unwrap();
+    let requests: Vec<(String, Vec<(&str, &str)>)> = vec![
+        (
+            "/projects".into(),
+            vec![("repo", "github.com/a/b"), ("usage", "1")],
+        ),
+        (
+            format!("/projects/{name}"),
+            vec![("usage", "9"), ("ignore", "on")],
+        ),
+        (
+            format!("/projects/{name}/funding"),
+            vec![("platform", "kofi"), ("handle", "x")],
+        ),
+        (
+            format!("/projects/{name}/funding/delete"),
+            vec![("platform", "kofi"), ("handle", "x")],
+        ),
+        (format!("/projects/{name}/delete"), vec![]),
+    ];
+    for (path, fields) in &requests {
+        let with = |csrf: &'static str| {
+            let mut all = vec![("_csrf", csrf)];
+            all.extend(fields.iter().copied());
+            encode(&all)
+        };
+        let send = |cookie: &str, origin: Option<&str>, csrf: &'static str| {
+            form_post(path, cookie, origin, &with(csrf))
+        };
+        let r = |req| h.app.clone().oneshot(req);
+        assert_eq!(
+            r(send(&reader, Some(ORIGIN), "csrf-token"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN,
+            "reader {path}"
+        );
+        assert_eq!(
+            r(send(&admin, Some(ORIGIN), "wrong"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN,
+            "csrf {path}"
+        );
+        assert_eq!(
+            r(send(&admin, None, "csrf-token")).await.unwrap().status(),
+            StatusCode::FORBIDDEN,
+            "origin {path}"
+        );
+    }
+    assert_eq!(h.store.get_project(name).await.unwrap().unwrap(), before);
+}
+
+#[tokio::test]
+async fn admins_change_settings_and_ignore_a_project() {
+    let h = harness(false).await;
+    let admin = session_cookie(&h.key, &session(true));
+    let name = "bigskysoftware-htmx";
+    let res = h
+        .app
+        .clone()
+        .oneshot(post(
+            &format!("/projects/{name}"),
+            &admin,
+            &[
+                ("_csrf", "csrf-token"),
+                ("usage", "2.5"),
+                ("ignore", "on"),
+                ("notes", "company-backed"),
+            ],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let project = h.store.get_project(name).await.unwrap().unwrap();
+    assert!(project.ignored);
+    assert_eq!(project.manual_usage, 2.5);
+    assert_eq!(project.notes, "company-backed");
+
+    // An ignored project leaves the list and shows up under "ignored".
+    let res = h.app.clone().oneshot(get("/", &admin)).await.unwrap();
+    let html = body(res).await;
+    assert!(html.contains("1 ignored project(s)"), "{html}");
+    let table = html.split("1 ignored project(s)").next().unwrap();
+    assert!(
+        !table.contains(&format!("/projects/{name}\"")),
+        "not in the main list"
+    );
+    assert!(
+        html.contains(&format!("/projects/{name}")),
+        "but still reachable"
+    );
+
+    // A bad value changes nothing.
+    let res = h
+        .app
+        .oneshot(post(
+            &format!("/projects/{name}"),
+            &admin,
+            &[("_csrf", "csrf-token"), ("usage", "-5"), ("notes", "")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        h.store
+            .get_project(name)
+            .await
+            .unwrap()
+            .unwrap()
+            .manual_usage,
+        2.5
+    );
+}
+
+#[tokio::test]
+async fn admins_add_and_remove_ways_to_donate() {
+    let h = harness(false).await;
+    let admin = session_cookie(&h.key, &session(true));
+    let name = "prometheus-prometheus"; // the demo gives it none
+    let add = |platform: &str, handle: &str| {
+        post(
+            &format!("/projects/{name}/funding"),
+            &admin,
+            &[
+                ("_csrf", "csrf-token"),
+                ("platform", platform),
+                ("handle", handle),
+            ],
+        )
+    };
+    let res = h
+        .app
+        .clone()
+        .oneshot(add("opencollective", "prometheus"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let res = h
+        .app
+        .clone()
+        .oneshot(add("other", "https://prometheus.io/donate"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+    let res = h
+        .app
+        .clone()
+        .oneshot(get(&format!("/projects/{name}"), &admin))
+        .await
+        .unwrap();
+    let html = body(res).await;
+    assert!(
+        html.contains("https://opencollective.com/prometheus"),
+        "{html}"
+    );
+    assert!(html.contains("https://prometheus.io/donate"));
+
+    // Duplicates, links that are not https, and links in a handle are refused.
+    assert_eq!(
+        h.app
+            .clone()
+            .oneshot(add("opencollective", "prometheus"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    for (platform, handle) in [
+        ("other", "javascript:alert(1)"),
+        ("other", "http://prometheus.io"),
+        ("kofi", "https://ko-fi.com/x"),
+        ("paypal", "x"),
+        ("kofi", ""),
+    ] {
+        let res = h.app.clone().oneshot(add(platform, handle)).await.unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{platform} {handle}"
+        );
+    }
+
+    let res = h
+        .app
+        .clone()
+        .oneshot(post(
+            &format!("/projects/{name}/funding/delete"),
+            &admin,
+            &[
+                ("_csrf", "csrf-token"),
+                ("platform", "opencollective"),
+                ("handle", "prometheus"),
+            ],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let funding = h.store.get_project(name).await.unwrap().unwrap().funding;
+    assert_eq!(funding.len(), 1);
+    assert_eq!(funding[0].platform, "other");
+}
+
+#[tokio::test]
+async fn only_manual_projects_can_be_deleted() {
+    let h = harness(false).await;
+    let admin = session_cookie(&h.key, &session(true));
+    // A discovered project: refused, with the reason.
+    let res = h
+        .app
+        .clone()
+        .oneshot(post(
+            "/projects/bigskysoftware-htmx/delete",
+            &admin,
+            &[("_csrf", "csrf-token")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    assert!(body(res).await.contains("found by a scan"));
+    assert!(
+        h.store
+            .get_project("bigskysoftware-htmx")
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // One added by hand: gone.
+    h.store
+        .create_project(
+            "github.com/a/b",
+            1.0,
+            "",
+            &donarium::model::Actor::new("u", "u"),
+            jiff::Timestamp::now(),
+        )
+        .await
+        .unwrap();
+    let res = h
+        .app
+        .oneshot(post(
+            "/projects/a-b/delete",
+            &admin,
+            &[("_csrf", "csrf-token")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(res.headers()[header::LOCATION], "/?notice=deleted");
+    assert!(h.store.get_project("a-b").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn readers_see_projects_but_no_forms() {
+    let h = harness(false).await;
+    let reader = session_cookie(&h.key, &session(false));
+    let res = h.app.clone().oneshot(get("/", &reader)).await.unwrap();
+    assert!(!body(res).await.contains("Add a project"));
+    let res = h
+        .app
+        .oneshot(get("/projects/bigskysoftware-htmx", &reader))
+        .await
+        .unwrap();
+    let html = body(res).await;
+    assert!(
+        html.contains("https://github.com/sponsors/bigskysoftware-htmx"),
+        "{html}"
+    );
+    assert!(!html.contains("Add a way to donate"));
+    assert!(!html.contains("Delete this project"));
+}

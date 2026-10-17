@@ -2,7 +2,8 @@
 
 use jiff::{SignedDuration, Timestamp};
 
-use crate::model::{ForgeHosts, Project, Source};
+use crate::funding;
+use crate::model::{ForgeHosts, Funding, Origin, Project, Source};
 
 pub fn fmt_date(t: Timestamp) -> String {
     t.strftime("%Y-%m-%d").to_string()
@@ -33,23 +34,64 @@ pub struct ProjectRow {
     pub name: String,
     pub repo: String,
     pub usage: String,
+    /// The part of the usage an admin assigned.
+    pub manual_usage: String,
     pub last_donation: String,
     pub last_donation_date: String,
+    /// Display names of the ways to donate, once each.
     pub funding: Vec<String>,
+    /// Added by hand rather than found by a scan.
+    pub manual: bool,
+    pub ignored: bool,
+    pub notes: String,
+}
+
+/// One way to donate, ready to show.
+#[derive(Clone, Debug)]
+pub struct FundingLink {
+    pub platform: String,
+    pub platform_name: String,
+    pub handle: String,
+    /// Empty if there is no safe link.
+    pub url: String,
+    pub manual: bool,
+}
+
+impl FundingLink {
+    pub fn new(f: &Funding) -> FundingLink {
+        FundingLink {
+            platform: f.platform.clone(),
+            platform_name: funding::display_name(&f.platform).to_string(),
+            handle: f.handle.clone(),
+            url: funding::link(&f.platform, &f.handle, f.url.as_deref()).unwrap_or_default(),
+            manual: f.manual,
+        }
+    }
 }
 
 impl ProjectRow {
     pub fn new(p: &Project, now: Timestamp) -> ProjectRow {
+        let mut funding: Vec<String> = Vec::new();
+        for f in &p.funding {
+            let name = funding::display_name(&f.platform).to_string();
+            if !funding.contains(&name) {
+                funding.push(name);
+            }
+        }
         ProjectRow {
             name: p.name.clone(),
             repo: p.repo.clone(),
             usage: format!("{:.1}", p.usage_score),
+            manual_usage: fmt_weight(p.manual_usage),
             last_donation: p
                 .last_donation
                 .map(|t| relative(t, now))
                 .unwrap_or_else(|| "never".into()),
             last_donation_date: p.last_donation.map(fmt_date).unwrap_or_default(),
-            funding: p.funding.clone(),
+            funding,
+            manual: p.origin == Origin::Manual,
+            ignored: p.ignored,
+            notes: p.notes.clone(),
         }
     }
 

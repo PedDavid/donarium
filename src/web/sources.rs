@@ -10,8 +10,8 @@ use axum_extra::extract::CookieJar;
 use serde::Deserialize;
 use tracing::info;
 
-use super::auth::{Admin, Session, User};
-use super::pages::Layout;
+use super::auth::{Admin, User};
+use super::pages::{Ctx, Feedback, Layout};
 use super::views::{SourceRow, fmt_weight};
 use super::{AppError, AppState};
 use crate::model::{ForgeHosts, NewSource, Provider, ScanMethod, SourceUpdate};
@@ -68,38 +68,6 @@ fn method_options(selected: &str) -> Vec<SelectOption> {
             selected: m.as_str() == selected,
         })
         .collect()
-}
-
-/// What a handler needs to render a page.
-struct Ctx<'a> {
-    state: &'a AppState,
-    session: &'a Session,
-    jar: &'a CookieJar,
-}
-
-/// What a page says about the request that led to it.
-struct Feedback {
-    error: String,
-    notice: &'static str,
-    status: StatusCode,
-}
-
-impl Feedback {
-    fn ok(notice: &'static str) -> Feedback {
-        Feedback {
-            error: String::new(),
-            notice,
-            status: StatusCode::OK,
-        }
-    }
-
-    fn rejected(error: impl Into<String>, status: StatusCode) -> Feedback {
-        Feedback {
-            error: error.into(),
-            notice: "",
-            status,
-        }
-    }
 }
 
 /// The only messages a `?notice=` can show: nothing from the URL is echoed.

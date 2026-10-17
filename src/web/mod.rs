@@ -3,6 +3,7 @@
 
 pub mod auth;
 mod pages;
+mod projects;
 mod sources;
 mod views;
 
@@ -236,9 +237,19 @@ async fn origin_check(State(state): State<AppState>, req: Request, next: Next) -
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/", get(pages::index))
+        .route("/", get(projects::index))
         .route("/search", get(pages::search))
-        .route("/projects/{name}", get(pages::detail))
+        .route("/projects", post(projects::create))
+        .route(
+            "/projects/{name}",
+            get(projects::detail).post(projects::update),
+        )
+        .route("/projects/{name}/delete", post(projects::delete))
+        .route("/projects/{name}/funding", post(projects::add_funding))
+        .route(
+            "/projects/{name}/funding/delete",
+            post(projects::remove_funding),
+        )
         .route("/sources", get(sources::index).post(sources::create))
         .route("/sources/{id}", get(sources::detail).post(sources::update))
         .route("/sources/{id}/delete", post(sources::delete))

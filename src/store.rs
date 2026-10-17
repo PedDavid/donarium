@@ -12,7 +12,8 @@ use sqlx::sqlite::{
 use sqlx::{Row, SqlitePool};
 
 use crate::model::{
-    Actor, NewSource, Project, Provider, ScanMethod, Source, SourceUpdate, TRANSITIVE_FACTOR,
+    Actor, Funding, NewSource, Origin, Project, ProjectUpdate, Provider, ScanMethod, Source,
+    SourceUpdate, TRANSITIVE_FACTOR,
 };
 use crate::scan::manifests::{ImageUse, Skipped};
 use crate::scan::resolve::slug;
@@ -24,6 +25,9 @@ pub enum StoreError {
     NotFound,
     #[error("that source already exists")]
     Duplicate,
+    /// Something that cannot be removed because other data depends on it.
+    #[error("{0}")]
+    InUse(String),
     #[error("database error: {0}")]
     Db(#[from] sqlx::Error),
     #[error("migration failed: {0}")]
@@ -547,13 +551,19 @@ impl Store {
 
     // --- projects ---
 
-    /// All discovered projects, ordered by name. The usage score counts
-    /// enabled sources only: their weight, in full for a direct dependency and
-    /// scaled by [`TRANSITIVE_FACTOR`] for a transitive one.
+    /// All projects, ordered by name. The usage score is what enabled sources
+    /// contribute (their weight, in full for a direct dependency and scaled by
+    /// [`TRANSITIVE_FACTOR`] for a transitive one) plus the usage an admin
+    /// assigned by hand.
     pub async fn list_projects(&self) -> Result<Vec<Project>, StoreError> {
         let rows = sqlx::query(
-            "SELECT p.name, p.repo, COALESCE(SUM(per.weight * per.factor), 0.0) AS usage_score
+            "SELECT p.name, p.repo, p.origin,
+                    COALESCE(SUM(per.weight * per.factor), 0.0) AS scanned,
+                    COALESCE(o.manual_usage, 0.0) AS manual_usage,
+                    COALESCE(o.ignore, 0) AS ignore,
+                    COALESCE(o.notes, '') AS notes
                FROM project p
+               LEFT JOIN project_override o ON o.project_id = p.id
                LEFT JOIN (
                     -- One row per (source, project): when both an image scan and
                     -- a dependency scan found it, the stronger kind counts once.
@@ -569,29 +579,38 @@ impl Store {
         .bind(TRANSITIVE_FACTOR)
         .fetch_all(&self.pool)
         .await?;
-        let mut funding: HashMap<String, Vec<String>> = HashMap::new();
+        let mut funding: HashMap<String, Vec<Funding>> = HashMap::new();
         for row in sqlx::query(
-            "SELECT p.name, f.platform
+            "SELECT p.name, f.platform, f.handle, f.url, f.origin
                FROM project_funding f JOIN project p ON p.id = f.project_id
-              ORDER BY p.name, f.platform",
+              ORDER BY p.name, f.platform, f.handle",
         )
         .fetch_all(&self.pool)
         .await?
         {
             let name: String = row.try_get("name")?;
-            let platform: String = row.try_get("platform")?;
-            let list = funding.entry(name).or_default();
-            if !list.contains(&platform) {
-                list.push(platform);
-            }
+            let origin: String = row.try_get("origin")?;
+            funding.entry(name).or_default().push(Funding {
+                platform: row.try_get("platform")?,
+                handle: row.try_get("handle")?,
+                url: row.try_get("url")?,
+                manual: origin == "manual",
+            });
         }
         rows.iter()
             .map(|row| {
                 let name: String = row.try_get("name")?;
+                let origin: String = row.try_get("origin")?;
+                let scanned: f64 = row.try_get("scanned")?;
+                let manual_usage: f64 = row.try_get("manual_usage")?;
                 Ok(Project {
                     funding: funding.remove(&name).unwrap_or_default(),
                     repo: row.try_get("repo")?,
-                    usage_score: row.try_get("usage_score")?,
+                    origin: Origin::parse(&origin).ok_or_else(|| corrupt("origin", &origin))?,
+                    usage_score: scanned + manual_usage,
+                    manual_usage,
+                    ignored: row.try_get("ignore")?,
+                    notes: row.try_get("notes")?,
                     // Filled in once donations are stored.
                     last_donation: None,
                     name,
@@ -607,6 +626,197 @@ impl Store {
             .into_iter()
             .find(|p| p.name == name))
     }
+
+    /// Adds a project by hand. `repo` is canonical (see
+    /// [`crate::scan::resolve::parse_project_repo`]).
+    pub async fn create_project(
+        &self,
+        repo: &str,
+        manual_usage: f64,
+        notes: &str,
+        by: &Actor,
+        now: Timestamp,
+    ) -> Result<Project, StoreError> {
+        let stamp = now.to_string();
+        let mut tx = self.pool.begin().await?;
+        if sqlx::query_scalar::<_, i64>("SELECT id FROM project WHERE repo = ?")
+            .bind(repo)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some()
+        {
+            return Err(StoreError::Duplicate);
+        }
+        let name = free_name(&mut tx, repo).await?;
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO project (name, repo, origin, first_seen_at, last_seen_at)
+             VALUES (?, ?, 'manual', ?, ?) RETURNING id",
+        )
+        .bind(&name)
+        .bind(repo)
+        .bind(&stamp)
+        .bind(&stamp)
+        .fetch_one(&mut *tx)
+        .await?;
+        write_override(&mut tx, id, manual_usage, false, notes, by, &stamp).await?;
+        tx.commit().await?;
+        self.get_project(&name).await?.ok_or(StoreError::NotFound)
+    }
+
+    /// Changes an admin's settings for a project (any project, not only manual ones).
+    pub async fn update_project(
+        &self,
+        name: &str,
+        update: &ProjectUpdate,
+        by: &Actor,
+        now: Timestamp,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let id = project_id(&mut tx, name).await?;
+        write_override(
+            &mut tx,
+            id,
+            update.manual_usage,
+            update.ignore,
+            &update.notes,
+            by,
+            &now.to_string(),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Deletes a project that was added by hand. A discovered one goes away
+    /// by itself when no source uses it, so it cannot be deleted here.
+    pub async fn delete_project(&self, name: &str) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let id = project_id(&mut tx, name).await?;
+        let origin: String = sqlx::query_scalar("SELECT origin FROM project WHERE id = ?")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if origin != "manual" {
+            return Err(StoreError::InUse(
+                "this project was found by a scan; it disappears when no source uses it".into(),
+            ));
+        }
+        sqlx::query("DELETE FROM project WHERE id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| match e.as_database_error() {
+                Some(db) if db.is_foreign_key_violation() => {
+                    StoreError::InUse("this project has donations, which are never deleted".into())
+                }
+                _ => StoreError::Db(e),
+            })?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Adds a way to donate by hand. `handle` and `url` are validated (see
+    /// [`crate::funding::parse`]).
+    pub async fn add_funding(
+        &self,
+        name: &str,
+        platform: &str,
+        handle: &str,
+        url: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let id = project_id(&mut tx, name).await?;
+        sqlx::query(
+            "INSERT INTO project_funding (project_id, platform, handle, url, origin)
+             VALUES (?, ?, ?, ?, 'manual')",
+        )
+        .bind(id)
+        .bind(platform)
+        .bind(handle)
+        .bind(url)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_unique)?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Removes a way to donate that was added by hand.
+    pub async fn remove_funding(
+        &self,
+        name: &str,
+        platform: &str,
+        handle: &str,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let id = project_id(&mut tx, name).await?;
+        let done = sqlx::query(
+            "DELETE FROM project_funding
+              WHERE project_id = ? AND platform = ? AND handle = ? AND origin = 'manual'",
+        )
+        .bind(id)
+        .bind(platform)
+        .bind(handle)
+        .execute(&mut *tx)
+        .await?;
+        if done.rows_affected() == 0 {
+            return Err(StoreError::NotFound);
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+}
+
+async fn project_id(tx: &mut sqlx::SqliteConnection, name: &str) -> Result<i64, StoreError> {
+    sqlx::query_scalar("SELECT id FROM project WHERE name = ?")
+        .bind(name)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(StoreError::NotFound)
+}
+
+async fn write_override(
+    tx: &mut sqlx::SqliteConnection,
+    project_id: i64,
+    manual_usage: f64,
+    ignore: bool,
+    notes: &str,
+    by: &Actor,
+    stamp: &str,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "INSERT INTO project_override (project_id, manual_usage, ignore, notes, updated_by, updated_by_name, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (project_id) DO UPDATE SET
+             manual_usage = excluded.manual_usage, ignore = excluded.ignore,
+             notes = excluded.notes, updated_by = excluded.updated_by,
+             updated_by_name = excluded.updated_by_name, updated_at = excluded.updated_at",
+    )
+    .bind(project_id)
+    .bind(manual_usage)
+    .bind(ignore)
+    .bind(notes)
+    .bind(&by.sub)
+    .bind(&by.name)
+    .bind(stamp)
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
+
+/// The slug for a new project: the short one, or one including the host when
+/// another repository already has it.
+async fn free_name(tx: &mut sqlx::SqliteConnection, repo: &str) -> Result<String, StoreError> {
+    let short = slug(repo, false);
+    let taken: Option<i64> = sqlx::query_scalar("SELECT id FROM project WHERE name = ?")
+        .bind(&short)
+        .fetch_optional(&mut *tx)
+        .await?;
+    Ok(if taken.is_some() || short.is_empty() {
+        slug(repo, true)
+    } else {
+        short
+    })
 }
 
 /// Inserts the project if it is new, otherwise marks it as seen, and returns
@@ -629,14 +839,7 @@ async fn upsert_project(
             .await?;
         return Ok(id);
     }
-    let mut name = slug(repo, false);
-    let taken: Option<i64> = sqlx::query_scalar("SELECT id FROM project WHERE name = ?")
-        .bind(&name)
-        .fetch_optional(&mut *tx)
-        .await?;
-    if taken.is_some() || name.is_empty() {
-        name = slug(repo, true);
-    }
+    let name = free_name(tx, repo).await?;
     Ok(sqlx::query_scalar(
         "INSERT INTO project (name, repo, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?) RETURNING id",
     )
@@ -930,6 +1133,185 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manual_projects_have_their_own_usage_and_are_never_pruned() {
+        let store = Store::memory().await.unwrap();
+        let alice = actor();
+        let project = store
+            .create_project(
+                "github.com/paperless-ngx/paperless-ngx",
+                3.0,
+                "runs my documents",
+                &alice,
+                now(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(project.name, "paperless-ngx-paperless-ngx");
+        assert_eq!(project.origin, Origin::Manual);
+        assert_eq!(project.usage_score, 3.0);
+        assert_eq!(project.manual_usage, 3.0);
+        assert_eq!(project.notes, "runs my documents");
+        assert!(!project.ignored);
+
+        // Adding the same repository again is refused.
+        assert!(matches!(
+            store
+                .create_project(
+                    "github.com/paperless-ngx/paperless-ngx",
+                    1.0,
+                    "",
+                    &alice,
+                    now()
+                )
+                .await,
+            Err(StoreError::Duplicate)
+        ));
+
+        // No source uses it, and a rebuild does not remove it.
+        store.rebuild_image_usage(now()).await.unwrap();
+        assert!(store.get_project(&project.name).await.unwrap().is_some());
+
+        // What a scan finds adds to what was assigned by hand.
+        let source = store
+            .create_source(&new_source("me/infra"), &alice, now())
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO usage (source_id, project_id, via, kind) SELECT ?, id, 'images', 'direct' FROM project")
+            .bind(source.id)
+            .execute(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_project(&project.name)
+                .await
+                .unwrap()
+                .unwrap()
+                .usage_score,
+            4.0
+        );
+
+        // Changing settings, including ignoring it.
+        store
+            .update_project(
+                &project.name,
+                &ProjectUpdate {
+                    manual_usage: 0.5,
+                    ignore: true,
+                    notes: "x".into(),
+                },
+                &Actor::new("u2", "bob"),
+                now(),
+            )
+            .await
+            .unwrap();
+        let changed = store.get_project(&project.name).await.unwrap().unwrap();
+        assert_eq!(
+            (changed.usage_score, changed.ignored, changed.notes.as_str()),
+            (1.5, true, "x")
+        );
+        assert!(matches!(
+            store
+                .update_project(
+                    "nope",
+                    &ProjectUpdate {
+                        manual_usage: 0.0,
+                        ignore: false,
+                        notes: String::new()
+                    },
+                    &alice,
+                    now()
+                )
+                .await,
+            Err(StoreError::NotFound)
+        ));
+
+        // Deleting a manual project works; its settings go with it.
+        store.delete_project(&project.name).await.unwrap();
+        assert!(store.get_project(&project.name).await.unwrap().is_none());
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM project_override")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(left, 0);
+        assert!(matches!(
+            store.delete_project(&project.name).await,
+            Err(StoreError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn discovered_projects_cannot_be_deleted_by_hand() {
+        let store = Store::memory().await.unwrap();
+        sqlx::query("INSERT INTO project (name, repo, first_seen_at, last_seen_at) VALUES ('a-b', 'github.com/a/b', 'x', 'x')")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.delete_project("a-b").await,
+            Err(StoreError::InUse(_))
+        ));
+        assert!(store.get_project("a-b").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn ways_to_donate_added_by_hand() {
+        let store = Store::memory().await.unwrap();
+        store
+            .create_project("github.com/a/b", 1.0, "", &actor(), now())
+            .await
+            .unwrap();
+        store
+            .add_funding("a-b", "opencollective", "ab", None)
+            .await
+            .unwrap();
+        store
+            .add_funding(
+                "a-b",
+                "other",
+                "https://example.org/donate",
+                Some("https://example.org/donate"),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.add_funding("a-b", "opencollective", "ab", None).await,
+            Err(StoreError::Duplicate)
+        ));
+        let funding = store.get_project("a-b").await.unwrap().unwrap().funding;
+        assert_eq!(funding.len(), 2);
+        assert!(funding.iter().all(|f| f.manual));
+
+        // A discovered way to donate cannot be removed by hand.
+        sqlx::query("INSERT INTO project_funding (project_id, platform, handle, origin) SELECT id, 'github-sponsors', 'ab', 'discovered' FROM project")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.remove_funding("a-b", "github-sponsors", "ab").await,
+            Err(StoreError::NotFound)
+        ));
+        store
+            .remove_funding("a-b", "opencollective", "ab")
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_project("a-b")
+                .await
+                .unwrap()
+                .unwrap()
+                .funding
+                .len(),
+            2
+        );
+        assert!(matches!(
+            store.add_funding("nope", "kofi", "x", None).await,
+            Err(StoreError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
     async fn duplicate_sources_are_rejected_ignoring_case() {
         let store = Store::memory().await.unwrap();
         store
@@ -1017,7 +1399,9 @@ mod tests {
         assert_eq!(projects.len(), 2);
         assert_eq!(projects[0].name, "a-b");
         assert!((projects[0].usage_score - 1.2).abs() < 1e-9);
-        assert_eq!(projects[0].funding, ["github-sponsors"]);
+        assert_eq!(projects[0].funding.len(), 1);
+        assert_eq!(projects[0].funding[0].platform, "github-sponsors");
+        assert!(!projects[0].funding[0].manual);
         assert!((projects[1].usage_score - TRANSITIVE_FACTOR).abs() < 1e-9);
         assert!(projects[1].funding.is_empty());
 

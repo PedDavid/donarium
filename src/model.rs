@@ -30,17 +30,67 @@ impl std::fmt::Display for Actor {
     }
 }
 
-/// An upstream open-source project you depend on.
+/// Where a project came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin {
+    /// Found by a scan. Removed again when no source uses it.
+    Discovered,
+    /// Added by an admin. Stays until an admin deletes it.
+    Manual,
+}
+
+impl Origin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Origin::Discovered => "discovered",
+            Origin::Manual => "manual",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Origin> {
+        match s {
+            "discovered" => Some(Origin::Discovered),
+            "manual" => Some(Origin::Manual),
+            _ => None,
+        }
+    }
+}
+
+/// One way to donate to a project.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Funding {
+    pub platform: String,
+    pub handle: String,
+    pub url: Option<String>,
+    /// Added by an admin, as opposed to discovered.
+    pub manual: bool,
+}
+
+/// An open-source project you depend on, or want to support.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Project {
     /// Stable slug, used in URLs (e.g. `tokio-rs-tokio`).
     pub name: String,
     /// Canonical repository, e.g. `github.com/tokio-rs/tokio`.
     pub repo: String,
+    pub origin: Origin,
+    /// What scans found, plus `manual_usage`.
     pub usage_score: f64,
+    /// The part of the score an admin assigned.
+    pub manual_usage: f64,
+    /// Left out of the ranking, e.g. a company-backed project.
+    pub ignored: bool,
+    pub notes: String,
     pub last_donation: Option<Timestamp>,
-    /// Funding platforms found for the project (e.g. `github-sponsors`).
-    pub funding: Vec<String>,
+    pub funding: Vec<Funding>,
+}
+
+/// An admin's settings for a project.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectUpdate {
+    pub manual_usage: f64,
+    pub ignore: bool,
+    pub notes: String,
 }
 
 /// Where a source repository is hosted.

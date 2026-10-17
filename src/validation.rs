@@ -71,6 +71,17 @@ fn valid_segment(seg: &str, github_owner: bool) -> bool {
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
+/// The usage an admin assigns to a project by hand: 0 (nothing) up to 1000.
+pub fn parse_usage(input: &str) -> Result<f64, ValidationError> {
+    let Ok(w) = input.trim().parse::<f64>() else {
+        return invalid("the usage must be a number, e.g. 2");
+    };
+    if !w.is_finite() || !(0.0..=1000.0).contains(&w) {
+        return invalid("the usage must be between 0 and 1000");
+    }
+    Ok(w)
+}
+
 pub fn parse_weight(input: &str) -> Result<f64, ValidationError> {
     let Ok(w) = input.trim().parse::<f64>() else {
         return invalid("the weight must be a number, e.g. 1.0");
@@ -167,6 +178,16 @@ mod tests {
             parse_repo(Gitea, GITEA, "https://GIT.example.com:3000/me/flux").unwrap(),
             "me/flux"
         );
+    }
+
+    #[test]
+    fn usages() {
+        assert_eq!(parse_usage("0").unwrap(), 0.0);
+        assert_eq!(parse_usage(" 2.5 ").unwrap(), 2.5);
+        assert_eq!(parse_usage("1000").unwrap(), 1000.0);
+        for bad in ["", "x", "-1", "1000.1", "NaN", "inf"] {
+            assert!(parse_usage(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

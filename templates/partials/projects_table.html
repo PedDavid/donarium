@@ -4,7 +4,7 @@
     <figure>{% include "icons/database.svg" %}</figure>
     {% if total == 0 %}
     <h3>No projects yet</h3>
-    <p>Projects appear here once your repositories have been scanned.</p>
+    <p>Projects appear here once your sources have been scanned, or when an admin adds one.</p>
     {% else %}
     <h3>No matching projects</h3>
     <p>Try a different filter.</p>
@@ -26,7 +26,7 @@
       {% for row in rows %}
       <tr>
         <td>
-          <a href="/projects/{{ row.name }}" class="font-medium hover:underline">{{ row.name }}</a>
+          <a href="/projects/{{ row.name }}" class="font-medium hover:underline">{{ row.name }}</a>{% if row.manual %} <span class="badge" data-variant="secondary">added by hand</span>{% endif %}
           <div class="text-xs text-muted-foreground">{{ row.repo }}</div>
         </td>
         <td>{{ row.usage }}</td>

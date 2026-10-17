@@ -287,6 +287,9 @@
   .mt-1 {
     margin-top: var(--spacing);
   }
+  .mt-2 {
+    margin-top: calc(var(--spacing) * 2);
+  }
   .mt-3 {
     margin-top: calc(var(--spacing) * 3);
   }
@@ -467,6 +470,9 @@
   }
   .break-all {
     word-break: break-all;
+  }
+  .whitespace-pre-line {
+    white-space: pre-line;
   }
   .text-foreground {
     color: var(--color-foreground);

@@ -70,7 +70,8 @@ canonical repository (e.g. `github.com/tokio-rs/tokio`).
 **Overrides** are optional per-project settings, edited on the project's
 detail page:
 
-- `usage_weight`: manual multiplier on the scanned usage.
+- `manual_usage`: usage you assign yourself, added to what scans found. It is how
+  a project that no scan can see (an application you run) gets a score.
 - `ignore`: e.g. a company-backed project you won't fund.
 - extra funding channels, merged with the discovered ones.
 - `aliases`: correct a wrong package → repository mapping.
@@ -88,7 +89,7 @@ source_skipped(source_id, file, value, reason)
 image_resolution(registry, repository, upstream, label, error, retry, resolved_at) -- registry cache
 image_mapping(registry, repository, project_repo, created_by, created_at) -- admin decisions
 project_funding(project_id, platform, handle, url, origin /* discovered | manual */)
-project_override(project_id, usage_weight, ignore, notes, updated_by, updated_at)
+project_override(project_id, manual_usage, ignore, notes, updated_by, updated_at)
 project_alias(alias_repo, project_id)
 ```
 

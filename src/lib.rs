@@ -1,6 +1,7 @@
 pub mod config;
 pub mod demo;
 pub mod duration;
+pub mod funding;
 pub mod metrics;
 pub mod model;
 pub mod scan;
