@@ -13,8 +13,9 @@ use sqlx::{Row, SqlitePool};
 
 use crate::fx::Rate;
 use crate::model::{
-    Actor, Conversion, Donation, DonationKind, Funding, FxSource, NewDonation, NewSource, Origin,
-    Project, ProjectUpdate, Provider, ScanMethod, Source, SourceUpdate, TRANSITIVE_FACTOR, Totals,
+    Actor, Conversion, Donation, DonationKind, Every, Funding, FxSource, NewDonation, NewRecurring,
+    NewSource, Origin, Project, ProjectUpdate, Provider, Recurring, ScanMethod, Source,
+    SourceUpdate, TRANSITIVE_FACTOR, Totals,
 };
 use crate::scan::manifests::{ImageUse, Skipped};
 use crate::scan::resolve::slug;
@@ -584,26 +585,32 @@ impl Store {
         now: Timestamp,
     ) -> Result<Donation, StoreError> {
         let mut tx = self.pool.begin().await?;
+        let id = insert_donation(&mut tx, new, by, now, None).await?;
+        tx.commit().await?;
+        self.get_donation(id).await?.ok_or(StoreError::NotFound)
+    }
+
+    /// Sets up a recurring donation. Nothing is recorded yet: see
+    /// [`crate::recurring::record_due`].
+    pub async fn create_recurring(
+        &self,
+        new: &NewRecurring,
+        by: &Actor,
+        now: Timestamp,
+    ) -> Result<i64, StoreError> {
+        let mut tx = self.pool.begin().await?;
         let project = project_id(&mut tx, &new.project).await?;
-        let (base, rate, source) = match &new.conversion {
-            Some(c) => (Some(c.base_minor), Some(c.rate), Some(c.source.as_str())),
-            None => (None, None, None),
-        };
-        let id: i64 = sqlx::query_scalar(
-            "INSERT INTO donation (project_id, platform, amount_minor, currency, donated_on,
-                                   base_amount_minor, fx_rate, fx_source, kind, note,
-                                   recorded_by, recorded_by_name, recorded_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        let id = sqlx::query_scalar(
+            "INSERT INTO recurring (project_id, platform, amount_minor, currency, every, starts_on,
+                                    note, created_by, created_by_name, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
         )
         .bind(project)
         .bind(&new.platform)
         .bind(new.amount_minor)
         .bind(&new.currency)
-        .bind(new.donated_on.to_string())
-        .bind(base)
-        .bind(rate)
-        .bind(source)
-        .bind(new.kind.as_str())
+        .bind(new.every.as_str())
+        .bind(new.starts_on.to_string())
         .bind(&new.note)
         .bind(&by.sub)
         .bind(&by.name)
@@ -611,7 +618,111 @@ impl Store {
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
-        self.get_donation(id).await?.ok_or(StoreError::NotFound)
+        Ok(id)
+    }
+
+    pub async fn list_recurring(&self) -> Result<Vec<Recurring>, StoreError> {
+        sqlx::query(
+            "SELECT r.*, p.name AS project_name, p.repo AS project_repo,
+                    (SELECT COUNT(*) FROM donation d WHERE d.recurring_id = r.id) AS recorded
+               FROM recurring r JOIN project p ON p.id = r.project_id
+              ORDER BY r.ends_on IS NOT NULL, r.id",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|row| {
+            let date = |col: &str| -> Result<jiff::civil::Date, StoreError> {
+                let raw: String = row.try_get(col)?;
+                raw.parse().map_err(|_| corrupt(col, &raw))
+            };
+            let every: String = row.try_get("every")?;
+            let ends: Option<String> = row.try_get("ends_on")?;
+            Ok(Recurring {
+                id: row.try_get("id")?,
+                project: row.try_get("project_name")?,
+                project_repo: row.try_get("project_repo")?,
+                platform: row.try_get("platform")?,
+                amount_minor: row.try_get("amount_minor")?,
+                currency: row.try_get("currency")?,
+                every: Every::parse(&every).ok_or_else(|| corrupt("interval", &every))?,
+                starts_on: date("starts_on")?,
+                ends_on: ends
+                    .map(|e| e.parse().map_err(|_| corrupt("ends_on", &e)))
+                    .transpose()?,
+                note: row.try_get("note")?,
+                created_by: Actor::new(
+                    row.try_get::<String, _>("created_by")?,
+                    row.try_get::<String, _>("created_by_name")?,
+                ),
+                recorded: row.try_get("recorded")?,
+            })
+        })
+        .collect()
+    }
+
+    /// Stops a plan after `last_day`: nothing falling later is recorded. What
+    /// was recorded stays.
+    pub async fn end_recurring(
+        &self,
+        id: i64,
+        last_day: jiff::civil::Date,
+    ) -> Result<(), StoreError> {
+        let done = sqlx::query("UPDATE recurring SET ends_on = ? WHERE id = ? AND ends_on IS NULL")
+            .bind(last_day.to_string())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        if done.rows_affected() == 0 {
+            let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM recurring WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+            return Err(match exists {
+                Some(_) => StoreError::InUse("that recurring donation has already ended".into()),
+                None => StoreError::NotFound,
+            });
+        }
+        Ok(())
+    }
+
+    /// The due dates a plan has already recorded a donation for.
+    pub async fn recorded_due_dates(&self, id: i64) -> Result<Vec<jiff::civil::Date>, StoreError> {
+        let raw: Vec<String> =
+            sqlx::query_scalar("SELECT recurring_due FROM donation WHERE recurring_id = ?")
+                .bind(id)
+                .fetch_all(&self.pool)
+                .await?;
+        raw.iter()
+            .map(|d| d.parse().map_err(|_| corrupt("recurring_due", d)))
+            .collect()
+    }
+
+    /// Records the donation a plan owes for `due`. `None` if that date was
+    /// already recorded (by another run).
+    pub async fn record_planned_donation(
+        &self,
+        plan: i64,
+        due: jiff::civil::Date,
+        new: &NewDonation,
+        by: &Actor,
+        now: Timestamp,
+    ) -> Result<Option<Donation>, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let id = match insert_donation(&mut tx, new, by, now, Some((plan, due))).await {
+            Ok(id) => id,
+            Err(StoreError::Db(e))
+                if e.as_database_error()
+                    .is_some_and(|d| d.is_unique_violation()) =>
+            {
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        };
+        tx.commit().await?;
+        Ok(Some(
+            self.get_donation(id).await?.ok_or(StoreError::NotFound)?,
+        ))
     }
 
     /// Cancels a donation with a void entry. The donation stays in the history,
@@ -1080,6 +1191,45 @@ impl Store {
         tx.commit().await?;
         Ok(())
     }
+}
+
+/// Inserts a donation row, from a plan's due date when `plan` is given.
+async fn insert_donation(
+    tx: &mut sqlx::SqliteConnection,
+    new: &NewDonation,
+    by: &Actor,
+    now: Timestamp,
+    plan: Option<(i64, jiff::civil::Date)>,
+) -> Result<i64, StoreError> {
+    let project = project_id(tx, &new.project).await?;
+    let (base, rate, source) = match &new.conversion {
+        Some(c) => (Some(c.base_minor), Some(c.rate), Some(c.source.as_str())),
+        None => (None, None, None),
+    };
+    Ok(sqlx::query_scalar(
+        "INSERT INTO donation (project_id, platform, amount_minor, currency, donated_on,
+                               base_amount_minor, fx_rate, fx_source, kind, note,
+                               recorded_by, recorded_by_name, recorded_at,
+                               recurring_id, recurring_due)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+    )
+    .bind(project)
+    .bind(&new.platform)
+    .bind(new.amount_minor)
+    .bind(&new.currency)
+    .bind(new.donated_on.to_string())
+    .bind(base)
+    .bind(rate)
+    .bind(source)
+    .bind(new.kind.as_str())
+    .bind(&new.note)
+    .bind(&by.sub)
+    .bind(&by.name)
+    .bind(now.to_string())
+    .bind(plan.map(|(id, _)| id))
+    .bind(plan.map(|(_, due)| due.to_string()))
+    .fetch_one(&mut *tx)
+    .await?)
 }
 
 async fn project_id(tx: &mut sqlx::SqliteConnection, name: &str) -> Result<i64, StoreError> {

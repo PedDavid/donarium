@@ -2208,3 +2208,141 @@ async fn setting_a_rate_needs_admin_csrf_and_origin() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
+
+mod recurring_donations {
+    use super::*;
+
+    fn plan_form<'a>(extra: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
+        let mut form = vec![
+            ("_csrf", "csrf-token"),
+            ("project", "tokio-rs-tokio"),
+            ("platform", "github-sponsors"),
+            ("amount", "5.00"),
+            ("currency", "EUR"),
+            ("every", "monthly"),
+            ("starts_on", "2026-08-10"),
+            ("note", "my sponsorship"),
+        ];
+        for (k, v) in extra {
+            form.retain(|(name, _)| name != k);
+            form.push((k, v));
+        }
+        form
+    }
+
+    #[tokio::test]
+    async fn setting_one_up_records_what_is_due_and_it_can_be_ended() {
+        let h = harness(false).await;
+        let admin = session_cookie(&h.key, &session(true));
+        let before = h.store.list_donations(None).await.unwrap().len();
+
+        let res = h
+            .app
+            .clone()
+            .oneshot(post("/recurring", &admin, &plan_form(&[])))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER, "{}", body(res).await);
+        assert_eq!(
+            res.headers()[header::LOCATION],
+            "/donations?notice=recurring-created"
+        );
+
+        // The real clock decides what is due: at least August, September,
+        // October 2026 have passed.
+        let added = h.store.list_donations(None).await.unwrap().len() - before;
+        assert!(added >= 3, "{added} donations recorded");
+        let html = body(
+            h.app
+                .clone()
+                .oneshot(get("/donations", &admin))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(html.contains("my sponsorship"));
+        assert!(html.contains("every month"));
+
+        // Nothing is duplicated by looking again.
+        let plans = h.store.list_recurring().await.unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].recorded as usize, added);
+
+        let res = h
+            .app
+            .clone()
+            .oneshot(post(
+                &format!("/recurring/{}/end", plans[0].id),
+                &admin,
+                &[("_csrf", "csrf-token")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        let html = body(
+            h.app
+                .clone()
+                .oneshot(get("/donations", &admin))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(html.contains("ended 20"));
+        // Ending twice is refused with the reason.
+        let res = h
+            .app
+            .oneshot(post(
+                &format!("/recurring/{}/end", plans[0].id),
+                &admin,
+                &[("_csrf", "csrf-token")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        assert!(body(res).await.contains("already ended"));
+    }
+
+    #[tokio::test]
+    async fn bad_plans_and_other_users_are_refused() {
+        let h = harness(false).await;
+        let admin = session_cookie(&h.key, &session(true));
+        let user = session_cookie(&h.key, &session(false));
+        for (extra, why) in [
+            (vec![("project", "nope")], "choose a project"),
+            (vec![("platform", "bitcoin")], "choose where you donate"),
+            (vec![("every", "weekly")], "choose how often"),
+            (vec![("amount", "abc")], ""),
+            (vec![("starts_on", "yesterday")], "YYYY-MM-DD"),
+            (vec![("starts_on", "1999-01-01")], "too long ago"),
+            (vec![("starts_on", "2999-01-01")], "more than a year away"),
+        ] {
+            let res = h
+                .app
+                .clone()
+                .oneshot(post("/recurring", &admin, &plan_form(&extra)))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY, "{extra:?}");
+            assert!(body(res).await.contains(why), "{extra:?}");
+        }
+        let res = h
+            .app
+            .clone()
+            .oneshot(post("/recurring", &user, &plan_form(&[])))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let res = h
+            .app
+            .clone()
+            .oneshot(post(
+                "/recurring",
+                &admin,
+                &plan_form(&[("_csrf", "wrong")]),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        assert!(h.store.list_recurring().await.unwrap().is_empty());
+    }
+}

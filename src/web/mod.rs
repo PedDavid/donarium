@@ -5,6 +5,7 @@ pub mod auth;
 mod donations;
 mod pages;
 mod projects;
+mod recurring;
 mod sources;
 pub mod views;
 
@@ -245,6 +246,8 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(projects::index))
         .route("/search", get(pages::search))
         .route("/donations", get(donations::index).post(donations::record))
+        .route("/recurring", post(recurring::create))
+        .route("/recurring/{id}/end", post(recurring::end))
         .route("/donations/{id}/void", post(donations::void))
         .route("/donations/{id}/rate", post(donations::set_rate))
         .route("/projects", post(projects::create))

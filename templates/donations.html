@@ -36,6 +36,43 @@
 
   {% include "partials/donations_table.html" %}
 
+  {% if !plans.is_empty() %}
+  <div class="flex flex-col gap-3">
+    <div>
+      <h2 class="text-lg font-semibold tracking-tight">Recurring</h2>
+      <p class="text-muted-foreground text-sm">These record a donation by themselves each time one is due.</p>
+    </div>
+    <div class="table-container rounded-lg border">
+      <table class="table">
+        <thead>
+          <tr><th>Project</th><th>Amount</th><th class="hidden md:table-cell">Via</th><th>Since</th><th class="hidden sm:table-cell">Recorded</th>{% if layout.admin %}<th><span class="sr-only">Actions</span></th>{% endif %}</tr>
+        </thead>
+        <tbody>
+          {% for p in plans %}
+          <tr{% if !p.ended.is_empty() %} class="text-muted-foreground"{% endif %}>
+            <td><a href="/projects/{{ p.project }}" class="font-medium hover:underline" title="{{ p.project_repo }}">{{ p.project }}</a>{% if !p.note.is_empty() %}<div class="text-xs text-muted-foreground">{{ p.note }}</div>{% endif %}</td>
+            <td class="whitespace-nowrap">{{ p.amount }} <span class="text-xs text-muted-foreground">{{ p.every }}</span></td>
+            <td class="hidden md:table-cell">{{ p.platform }}</td>
+            <td class="whitespace-nowrap">{{ p.since }}{% if !p.ended.is_empty() %}<div class="text-xs"><span class="badge" data-variant="secondary">{{ p.ended }}</span></div>{% endif %}</td>
+            <td class="hidden sm:table-cell">{{ p.recorded }}</td>
+            {% if layout.admin %}
+            <td class="text-end">
+              {% if p.ended.is_empty() %}
+              <form method="post" action="/recurring/{{ p.id }}/end">
+                <input type="hidden" name="_csrf" value="{{ layout.csrf }}">
+                <button type="submit" class="btn" data-variant="ghost" data-size="sm" title="Nothing more is recorded. What it recorded stays.">End</button>
+              </form>
+              {% endif %}
+            </td>
+            {% endif %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+
   {% if layout.admin %}
   <form id="record" method="post" action="/donations" class="card w-full sm:max-w-xl" autocomplete="off">
     <input type="hidden" name="_csrf" value="{{ layout.csrf }}">
@@ -97,6 +134,58 @@
     <footer>
       <button type="submit" class="btn">Record</button>
     </footer>
+  </form>
+  {% endif %}
+
+  {% if layout.admin %}
+  <form id="recurring" method="post" action="/recurring" class="card w-full sm:max-w-xl" autocomplete="off">
+    <input type="hidden" name="_csrf" value="{{ layout.csrf }}">
+    <header>
+      <h2>Set up a recurring donation</h2>
+      <p>For a subscription such as GitHub Sponsors. A donation is recorded for every month or year, from the first date on, converted at that day's rate.</p>
+    </header>
+    <section class="flex flex-col gap-4">
+      <div class="field">
+        <label for="plan-project">Project</label>
+        <select id="plan-project" class="select" name="project" required>
+          <option value="">Choose…</option>
+          {% for p in projects %}<option value="{{ p.value }}" {% if p.value == plan.project %}selected{% endif %}>{{ p.label }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="plan-platform">Donated through</label>
+        <select id="plan-platform" class="select" name="platform">
+          {% for p in platforms %}<option value="{{ p.value }}" {% if p.value == plan.platform %}selected{% endif %}>{{ p.label }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="grid grid-cols-2 gap-4">
+        <div class="field">
+          <label for="plan-amount">Amount</label>
+          <input id="plan-amount" type="text" inputmode="decimal" name="amount" value="{{ plan.amount }}" placeholder="5.00" required>
+        </div>
+        <div class="field">
+          <label for="plan-currency">Currency</label>
+          <input id="plan-currency" type="text" name="currency" value="{{ plan.currency }}" maxlength="3" required spellcheck="false">
+        </div>
+      </div>
+      <div class="grid grid-cols-2 gap-4">
+        <div class="field">
+          <label for="plan-every">How often</label>
+          <select id="plan-every" class="select" name="every">
+            {% for e in everys %}<option value="{{ e.value }}" {% if e.selected %}selected{% endif %}>{{ e.label }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label for="plan-start">First donation</label>
+          <input id="plan-start" type="date" name="starts_on" value="{{ plan.starts_on }}" required>
+        </div>
+      </div>
+      <div class="field">
+        <label for="plan-note">Note <span class="text-muted-foreground">(optional)</span></label>
+        <input id="plan-note" type="text" name="note" value="{{ plan.note }}" maxlength="500">
+      </div>
+    </section>
+    <footer><button type="submit" class="btn">Set up</button></footer>
   </form>
   {% endif %}
 </div>
