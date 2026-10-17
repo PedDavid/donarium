@@ -16,26 +16,28 @@
   <table class="table">
     <thead>
       <tr>
+        <th class="w-10" title="Position in the ranking: who to support next">#</th>
         <th>Project</th>
-        <th>Usage</th>
+        <th title="Its share of all the usage in the ranking">Usage</th>
         <th>Last donation</th>
-        <th class="hidden sm:table-cell">Funding</th>
+        <th class="hidden sm:table-cell" title="Usage share times how long since you last donated">Priority</th>
+        <th><span class="sr-only">Donate</span></th>
       </tr>
     </thead>
     <tbody>
       {% for row in rows %}
       <tr>
+        <td class="text-muted-foreground">{{ row.rank }}</td>
         <td>
           <a href="/projects/{{ row.name }}" class="font-medium hover:underline">{{ row.name }}</a>{% if row.manual %} <span class="badge" data-variant="secondary">added by hand</span>{% endif %}
           <div class="text-xs text-muted-foreground">{{ row.repo }}</div>
         </td>
-        <td>{{ row.usage }}</td>
-        <td class="text-muted-foreground" title="{{ row.last_donation_date }}">{{ row.last_donation }}</td>
-        <td class="hidden sm:table-cell">
-          {% if row.funding.is_empty() %}
-          <span class="text-muted-foreground">none found</span>
-          {% else %}
-          {% for f in row.funding %}<span class="badge" data-variant="secondary">{{ f }}</span> {% endfor %}
+        <td title="Usage score {{ row.usage }}">{{ row.share }}</td>
+        <td class="text-muted-foreground" title="{{ row.last_donation_date }}">{{ row.last_donation }}{% if !row.staleness.is_empty() %} <span class="text-xs">({{ row.staleness }})</span>{% endif %}</td>
+        <td class="hidden sm:table-cell">{{ row.priority }}</td>
+        <td class="text-end">
+          {% if !row.donate_url.is_empty() %}
+          <a class="btn" data-variant="outline" data-size="sm" href="{{ row.donate_url }}" target="_blank" rel="noopener noreferrer" title="Opens {{ row.donate_label }}. Record the donation afterwards.">Donate {% include "icons/external-link.svg" %}</a>
           {% endif %}
         </td>
       </tr>
