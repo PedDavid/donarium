@@ -101,6 +101,21 @@ serviceMonitor:
   interval: 60s
   labels: {}
 
+# Alerts for the Prometheus Operator.
+prometheusRule:
+  enabled: false
+  labels: {}
+  # Warn when an enabled source has not been scanned for this long.
+  scanStaleAfterHours: 72
+  # Remind you to donate when none was recorded for this many days. 0 is off.
+  donationReminderDays: 0
+
+# A Grafana dashboard, picked up by the Grafana sidecar by its label.
+grafanaDashboard:
+  enabled: false
+  label: grafana_dashboard
+  labelValue: "1"
+
 # Numeric IDs are required: with runAsNonRoot the kubelet cannot verify a
 # non-numeric image USER. 65532 is distroless's `nonroot`.
 podSecurityContext:

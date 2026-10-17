@@ -1,0 +1,62 @@
+{{- if .Values.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "donarium.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "donarium.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: donarium
+      rules:
+        - alert: DonariumDown
+          expr: absent(donarium_sources)
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Donarium is not reporting metrics
+        - alert: DonariumScanFailing
+          expr: donarium_source_last_scan_ok == 0
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "The last scan of {{ "{{ $labels.repo }}" }} failed"
+            description: Open the source in Donarium to see why. Its usage data is out of date until a scan works.
+        - alert: DonariumScansStale
+          expr: time() - donarium_source_last_scan_timestamp_seconds > {{ int (mul .Values.prometheusRule.scanStaleAfterHours 3600) }}
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ "{{ $labels.repo }}" }} has not been scanned for {{ .Values.prometheusRule.scanStaleAfterHours }} hours"
+        - alert: DonariumDonationsWithoutRate
+          expr: donarium_donations_without_conversion > 0
+          for: 24h
+          labels:
+            severity: info
+          annotations:
+            summary: Some donations are not in the totals yet
+            description: Their exchange rate could not be fetched. Enter a rate by hand on the donations page, or check the rate service.
+        - alert: DonariumRateServiceFailing
+          expr: increase(donarium_fx_requests_total{result="error"}[6h]) > 5
+          for: 6h
+          labels:
+            severity: info
+          annotations:
+            summary: Looking up exchange rates keeps failing
+        {{- if .Values.prometheusRule.donationReminderDays }}
+        - alert: DonariumTimeToDonate
+          expr: time() - max(donarium_last_donation_timestamp_seconds) > {{ int (mul .Values.prometheusRule.donationReminderDays 86400) }}
+          labels:
+            severity: info
+          annotations:
+            summary: No donation for {{ .Values.prometheusRule.donationReminderDays }} days
+            description: Open Donarium to see who is next.
+        {{- end }}
+{{- end }}
