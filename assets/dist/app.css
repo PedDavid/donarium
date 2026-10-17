@@ -314,11 +314,17 @@
   .table {
     display: table;
   }
+  .h-2 {
+    height: calc(var(--spacing) * 2);
+  }
   .h-14 {
     height: calc(var(--spacing) * 14);
   }
   .min-h-screen {
     min-height: 100vh;
+  }
+  .w-10 {
+    width: calc(var(--spacing) * 10);
   }
   .w-full {
     width: 100%;
@@ -514,6 +520,9 @@
   .antialiased {
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+  }
+  .accent-primary {
+    accent-color: var(--color-primary);
   }
   .outline {
     outline-style: var(--tw-outline-style);
