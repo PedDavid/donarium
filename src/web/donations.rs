@@ -16,6 +16,7 @@ use super::pages::{Ctx, Feedback, Layout};
 use super::views::{DonationRow, TotalsView};
 use super::{AppError, AppState};
 use crate::funding;
+use crate::fx::FxError;
 use crate::model::{Conversion, DonationKind, FxSource, NewDonation};
 use crate::money;
 use crate::store::StoreError;
@@ -25,6 +26,16 @@ fn notice(code: &str) -> &'static str {
     match code {
         "recorded" => "Donation recorded.",
         "pending" => "Donation recorded. Its amount in the base currency is not known yet.",
+        "pending-unsupported" => {
+            "Donation recorded. The European Central Bank publishes no rate for this currency: enter one on the donation to include it in the totals."
+        }
+        "pending-later" => {
+            "Donation recorded. The exchange rate service could not be reached, so its amount in the base currency will be filled in automatically later."
+        }
+        "pending-off" => {
+            "Donation recorded. Exchange rates are turned off: enter a rate on the donation to include it in the totals."
+        }
+        "rated" => "Rate saved. The donation now counts in the totals.",
         "voided" => "Donation voided. It stays in the history, marked as voided.",
         _ => "",
     }
@@ -209,7 +220,11 @@ impl RecordForm {
 }
 
 /// Turns the form into a donation, or says what is wrong with it.
-async fn parse(state: &AppState, form: &RecordForm) -> Result<NewDonation, String> {
+/// Why a donation's amount in the base currency is not known, if it is not.
+async fn parse(
+    state: &AppState,
+    form: &RecordForm,
+) -> Result<(NewDonation, Option<&'static str>), String> {
     if state
         .inner
         .store
@@ -247,6 +262,7 @@ async fn parse(state: &AppState, form: &RecordForm) -> Result<NewDonation, Strin
         return Err("the note contains characters that are not allowed".into());
     }
     let base = &state.inner.cfg.base_currency;
+    let mut pending = None;
     let conversion = if &currency == base {
         if !form.rate.trim().is_empty() {
             return Err(format!("no rate is needed: it is already in {base}"));
@@ -257,8 +273,25 @@ async fn parse(state: &AppState, form: &RecordForm) -> Result<NewDonation, Strin
             source: FxSource::Same,
         })
     } else if form.rate.trim().is_empty() {
-        // Pending: converted later, or by entering a rate.
-        None
+        // Ask the exchange rate service. If it cannot say, the donation is
+        // recorded anyway and stays pending.
+        match state
+            .inner
+            .fx
+            .convert(&state.inner.store, amount_minor, &currency, donated_on)
+            .await
+        {
+            Ok(conversion) => Some(conversion),
+            Err(e) => {
+                tracing::info!(error = %e, %currency, "recording a donation without its conversion");
+                pending = Some(match e {
+                    FxError::Unsupported(_) | FxError::Dust => "pending-unsupported",
+                    FxError::Disabled => "pending-off",
+                    _ => "pending-later",
+                });
+                None
+            }
+        }
     } else {
         let rate = money::parse_rate(&form.rate).map_err(|e| e.0)?;
         let base_minor = money::convert(amount_minor, &currency, rate, base)
@@ -269,16 +302,19 @@ async fn parse(state: &AppState, form: &RecordForm) -> Result<NewDonation, Strin
             source: FxSource::Manual,
         })
     };
-    Ok(NewDonation {
-        project: form.project.clone(),
-        platform: form.platform.clone(),
-        amount_minor,
-        currency,
-        donated_on,
-        kind,
-        note,
-        conversion,
-    })
+    Ok((
+        NewDonation {
+            project: form.project.clone(),
+            platform: form.platform.clone(),
+            amount_minor,
+            currency,
+            donated_on,
+            kind,
+            note,
+            conversion,
+        },
+        pending,
+    ))
 }
 
 pub async fn record(
@@ -299,8 +335,8 @@ pub async fn record(
         session: &session,
         jar: &jar,
     };
-    let new = match parse(&state, &form).await {
-        Ok(new) => new,
+    let (new, pending) = match parse(&state, &form).await {
+        Ok(parsed) => parsed,
         Err(error) => {
             let rejected = Feedback::rejected(error, StatusCode::UNPROCESSABLE_ENTITY);
             return render(&ctx, &form.project, form.values(), rejected).await;
@@ -316,10 +352,10 @@ pub async fn record(
         amount = donation.amount_minor, currency = %donation.currency,
         converted = donation.conversion.is_some(), "donation recorded"
     );
-    let code = if donation.conversion.is_some() {
-        "recorded"
-    } else {
-        "pending"
+    let code = match (donation.conversion.is_some(), pending) {
+        (true, _) => "recorded",
+        (false, Some(why)) => why,
+        (false, None) => "pending",
     };
     Ok(Redirect::to(&format!(
         "/donations?notice={code}&project={}",
@@ -379,6 +415,88 @@ pub async fn void(
             )
             .await
         }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The donations page again, with what went wrong.
+async fn reject(
+    ctx: &Ctx<'_>,
+    project: &str,
+    error: String,
+    status: StatusCode,
+) -> Result<Response, AppError> {
+    let form = blank_form(ctx.state, project);
+    render(ctx, project, form, Feedback::rejected(error, status)).await
+}
+
+#[derive(Deserialize, Default)]
+pub struct RateForm {
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
+    #[serde(default)]
+    rate: String,
+    /// Keep the list limited to this project afterwards.
+    #[serde(default)]
+    project: String,
+}
+
+/// Sets the rate of a donation that is still waiting for one: for a currency
+/// the ECB does not publish, or to record what the card was really charged.
+/// A donation's conversion is never changed once it exists.
+pub async fn set_rate(
+    State(state): State<AppState>,
+    Admin(session): Admin,
+    jar: CookieJar,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Form(form): Form<RateForm>,
+) -> Result<Response, AppError> {
+    session.check_csrf(&headers, form.csrf.as_deref())?;
+    if !session.fresh_enough(state.inner.cfg.auth.step_up_max_age, jiff::Timestamp::now()) {
+        return Ok(Redirect::to("/auth/login?reauth=true&next=%2Fdonations").into_response());
+    }
+    let ctx = Ctx {
+        state: &state,
+        session: &session,
+        jar: &jar,
+    };
+    let donation = state
+        .inner
+        .store
+        .get_donation(id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("no donation with id {id}")))?;
+    if donation.conversion.is_some() {
+        let why = "this donation already has its amount in the base currency";
+        return reject(&ctx, &form.project, why.into(), StatusCode::CONFLICT).await;
+    }
+    let base = &state.inner.cfg.base_currency;
+    let converted = money::parse_rate(&form.rate)
+        .map_err(|e| e.0)
+        .and_then(|rate| {
+            money::convert(donation.amount_minor, &donation.currency, rate, base)
+                .map(|base_minor| Conversion {
+                    base_minor,
+                    rate,
+                    source: FxSource::Manual,
+                })
+                .ok_or_else(|| "that amount converts to nothing in the base currency".to_string())
+        });
+    let conversion = match converted {
+        Ok(c) => c,
+        Err(error) => {
+            return reject(&ctx, &form.project, error, StatusCode::UNPROCESSABLE_ENTITY).await;
+        }
+    };
+    match state.inner.store.set_conversion(id, &conversion).await {
+        Ok(()) => {
+            info!(actor = %session.sub, donation = id, rate = conversion.rate, "rate set by hand");
+            let project =
+                url::form_urlencoded::byte_serialize(form.project.as_bytes()).collect::<String>();
+            Ok(Redirect::to(&format!("/donations?notice=rated&project={project}")).into_response())
+        }
+        Err(StoreError::InUse(why)) => reject(&ctx, &form.project, why, StatusCode::CONFLICT).await,
         Err(e) => Err(e.into()),
     }
 }

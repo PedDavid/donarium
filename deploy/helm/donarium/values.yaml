@@ -65,6 +65,13 @@ github:
 # database the first time it is used: changing it later is refused.
 baseCurrency: EUR
 
+# Exchange rates for donations in other currencies, from a Frankfurter server
+# (the European Central Bank's daily rates). With fx.disabled, such donations
+# wait until a rate is entered by hand.
+fx:
+  url: https://api.frankfurter.dev
+  disabled: false
+
 # How often all sources are scanned. "0s" turns scheduled scans off (they can
 # still be started from the UI).
 scanInterval: 24h

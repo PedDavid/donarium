@@ -83,6 +83,20 @@ pub struct Config {
     #[arg(long, env = "DONARIUM_BASE_CURRENCY", default_value = "EUR")]
     pub base_currency: String,
 
+    /// Where exchange rates come from: a Frankfurter server, which serves the
+    /// European Central Bank's daily rates.
+    #[arg(
+        long,
+        env = "DONARIUM_FX_URL",
+        default_value = "https://api.frankfurter.dev"
+    )]
+    pub fx_url: Url,
+
+    /// Never look up exchange rates. Donations in other currencies then stay
+    /// pending until a rate is entered by hand.
+    #[arg(long, env = "DONARIUM_FX_DISABLED")]
+    pub fx_disabled: bool,
+
     /// How often all sources are scanned. 0s turns scheduled scans off; scans
     /// can still be started from the UI.
     #[arg(long, env = "DONARIUM_SCAN_INTERVAL", default_value = "24h", value_parser = parse_duration)]
@@ -186,6 +200,7 @@ impl Config {
             ("--gitlab-url", Some(&self.gitlab_url)),
             ("--gitea-url", self.gitea_url.as_ref()),
             ("--github-api-url", Some(&self.github_api_url)),
+            ("--fx-url", Some(&self.fx_url)),
         ] {
             if let Some(url) = url
                 && (!matches!(url.scheme(), "http" | "https") || url.host_str().is_none())
@@ -233,6 +248,8 @@ mod tests {
         assert_eq!(cfg.database_url, "sqlite://donarium.db");
         assert_eq!(cfg.gitlab_url.as_str(), "https://gitlab.com/");
         assert_eq!(cfg.scan_interval, SignedDuration::from_hours(24));
+        assert_eq!(cfg.fx_url.as_str(), "https://api.frankfurter.dev/");
+        assert!(!cfg.fx_disabled);
         assert!(cfg.registry_allow.is_empty());
         assert_eq!(cfg.public_origin(), "http://localhost:8080");
         assert_eq!(
@@ -264,6 +281,7 @@ mod tests {
             ("--gitlab-url", "ftp://gitlab.example.com"),
             ("--gitea-url", "file:///etc"),
             ("--github-api-url", "git://github.com"),
+            ("--fx-url", "ftp://rates.example.com"),
         ] {
             let cfg = Config::try_parse_from(["donarium", flag, value]).unwrap();
             assert!(cfg.check().unwrap_err().contains(flag), "{flag}");

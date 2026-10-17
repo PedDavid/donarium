@@ -286,27 +286,36 @@ because the app can't see your bank.
 - Each donation keeps its **original** `amount_minor` + `currency` (the figure
   on the receipt) and a **base amount** (`base_amount_minor`, `fx_rate`,
   `fx_source`) converted once, when it is recorded. Totals never shift when
-  rates move later.
-- `--base-currency` (default `EUR`) is the currency for totals, the fair-share
-  bars and metrics. Changing it later only affects donations recorded after the
-  change; a `donarium reconvert` subcommand re-derives base amounts from the
-  cached rates if needed.
-- **Rates** come from [Frankfurter](https://frankfurter.dev) (ECB reference
-  rates): free, no key, historical by date. A weekend or holiday uses the
-  previous business day. The host is fixed in code (`--fx-url` overrides it for
-  tests and self-hosted mirrors). Results are cached in `fx_rate`.
-- **Override.** The record form pre-fills the rate and base amount. An admin can
-  edit them when the real charge differed (card fees, a different rate), which
-  sets `fx_source = manual`. Currencies the ECB doesn't publish (e.g. crypto)
-  require a manual rate.
-- **Failure handling.** If the lookup fails, recording is not blocked: the
-  donation is saved with the base amount empty, and a retry task fills it in
-  later. Donations without a base amount are excluded from base totals, shown
-  with a marker, and counted in a metric.
-- Original amounts per currency are always shown alongside base totals in the
-  detail view. This is a tracking aid, not tax advice: the receipt and bank
-  statement stay the source of truth. A CSV export with the original amount,
-  rate and receipt reference is a later milestone.
+  rates move later. The arithmetic is exact (integers, not floats: with floats,
+  10.00 × 0.9255 rounds the wrong way).
+- `--base-currency` (default `EUR`) is the currency for totals and metrics. It is
+  fixed for a database the first time it is used and a different value is
+  refused. Changing it, with a `donarium reconvert` that re-derives base amounts
+  from the cached rates, is not implemented.
+- **Rates** come from [Frankfurter](https://frankfurter.dev) (the ECB's daily
+  reference rates, `--fx-url`), looked up by the day of the donation and cached
+  in `fx_rate`. A weekend or holiday gets the previous business day's rate; an
+  answer for a later day, or for more than ten days before, is refused.
+  `--fx-disabled` turns lookups off.
+- **By hand.** The record form takes a rate, which wins over the service, for
+  what the card was really charged. A donation recorded without one that could
+  not be converted can be given a rate afterwards, once: that is the one change
+  the database allows to a donation.
+- **Failure handling.** Recording is never blocked. If the lookup fails, the
+  donation is saved *pending* and an hourly task fills it in. A currency the
+  service has no rate for (crypto) is not asked about again until restart, and
+  waits for a rate entered by hand. Pending donations are left out of base
+  totals, marked in the list, and counted in a metric. When the service rate
+  limits, the pass stops instead of retrying the rest.
+- Original amounts per currency are always shown next to the base totals. This
+  is a tracking aid, not tax advice: the receipt and bank statement stay the
+  source of truth. A CSV export with the original amount, rate and receipt
+  reference is a later milestone.
+- **Not verified against the real service.** The ECB's and Frankfurter's hosts
+  were not reachable from the environment this was built in, so the client is
+  written to Frankfurter's documented response and tested against mocks.
+  `cargo test --test live live_exchange -- --ignored --nocapture` checks it
+  against the real one (it says SKIPPED when it cannot reach it).
 
 ## 7. Receipts
 
@@ -345,19 +354,21 @@ pub trait ReceiptStore: Send + Sync {
 
 ## 8. Metrics and alerts
 
-| Metric | Meaning |
-|---|---|
-| `donarium_project_usage_score{project}` | Current usage score |
-| `donarium_project_priority{project}` | Ranking value (top N only, to bound cardinality) |
-| `donarium_last_donation_timestamp_seconds{project}` | |
-| `donarium_donated_base_total` | Sum of non-void donations in the base currency (gauge) |
-| `donarium_donated_original_total{currency}` | Sum in the original currencies |
-| `donarium_donations_without_conversion` | Donations still missing a base amount |
-| `donarium_fx_requests_total{result}` | Rate lookups |
-| `donarium_donations_without_receipt` | Receipt hygiene |
-| `donarium_scan_last_success_timestamp_seconds{source}` | Alert when scans go stale |
-| `donarium_scan_requests_total{provider,result}` | |
-| `donarium_receipt_store_healthy{store}` | |
+| Metric | Meaning | Built |
+|---|---|---|
+| `donarium_project_usage_score{project}` | Current usage score | yes |
+| `donarium_sources{state}` | Sources, enabled and disabled | yes |
+| `donarium_source_last_scan_timestamp_seconds{provider,repo}` | Last scan of an enabled source | yes |
+| `donarium_source_last_scan_ok{provider,repo}` | 1 if it worked, 0 if it failed | yes |
+| `donarium_last_donation_timestamp_seconds{project}` | The day of the last donation (00:00 UTC) | yes |
+| `donarium_donated_base_amount{currency}` | Donations that count, in the base currency | yes |
+| `donarium_donated_paid_amount{currency}` | The same, in the currencies they were paid in | yes |
+| `donarium_donations` | Number of donations that count | yes |
+| `donarium_donations_without_conversion` | Donations still missing a base amount | yes |
+| `donarium_fx_requests_total{result}` | Rate lookups: ok, unsupported, rate_limited, error | yes |
+| `donarium_project_priority{project}` | Ranking value (top N only, to bound cardinality) | with ranking |
+| `donarium_donations_without_receipt` | Receipt hygiene | with receipts |
+| `donarium_receipt_store_healthy{store}` | | with receipts |
 
 Shipped `PrometheusRule`s: scans stale, receipt store unhealthy, donations
 without receipts, and an optional "no donation in N days" reminder.

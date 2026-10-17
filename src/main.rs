@@ -8,6 +8,7 @@ use tracing_subscriber::EnvFilter;
 
 use donarium::config::Config;
 use donarium::demo;
+use donarium::fx::{Fx, FxClient, spawn_retry};
 use donarium::metrics::Metrics;
 use donarium::model::Provider;
 use donarium::scan::fetch::ArchiveFetcher;
@@ -46,12 +47,30 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     let metrics = Metrics::new();
+    // Demo mode never reaches out for rates either.
+    let fx_client = if cfg.demo || cfg.fx_disabled {
+        None
+    } else {
+        Some(FxClient::new(cfg.fx_url.clone()).context("building the exchange rate client")?)
+    };
+    let fx = Fx::new(
+        fx_client,
+        cfg.base_currency.clone(),
+        metrics.fx_requests.clone(),
+    );
+    if fx.enabled() {
+        spawn_retry(
+            fx.clone(),
+            store.clone(),
+            std::time::Duration::from_secs(3600),
+        );
+    }
     let demo_dev_auth = cfg.demo && cfg.auth.oidc_issuer.is_none();
     let auth = AuthMode::from_config(&cfg.auth, &cfg.public_url, demo_dev_auth)?;
     let cookie_key = load_cookie_key(&cfg)?;
 
     let ops = web::ops_router(store.clone(), metrics, cfg.base_currency.clone());
-    let state = AppState::new(cfg.clone(), store, scanner, auth, cookie_key);
+    let state = AppState::new(cfg.clone(), store, scanner, fx, auth, cookie_key);
     let app = web::router(state);
 
     let ui_listener = tokio::net::TcpListener::bind(cfg.listen).await?;

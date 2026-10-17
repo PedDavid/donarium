@@ -106,3 +106,52 @@ async fn live_github_repository_is_read_and_scanned() {
         "{repo} should contain at least one image"
     );
 }
+
+/// The real Frankfurter service. This is the one external service the mocked
+/// tests cannot vouch for: they encode what its documentation says.
+#[tokio::test]
+#[ignore = "needs network access"]
+async fn live_exchange_rates() {
+    use donarium::fx::{FxClient, FxError};
+    use jiff::civil::date;
+
+    let url = std::env::var("DONARIUM_LIVE_FX_URL")
+        .unwrap_or_else(|_| "https://api.frankfurter.dev".into());
+    let client = FxClient::new(url.parse().unwrap()).unwrap();
+
+    // A Friday, and the Sunday after it: the weekend gets Friday's rate.
+    let friday = client.rate(date(2024, 3, 8), "USD", "EUR").await;
+    let friday = match friday {
+        Ok(rate) => rate,
+        Err(FxError::Http(why)) => {
+            eprintln!("SKIPPED, NOT VERIFIED: the rate service could not be reached ({why})");
+            return;
+        }
+        Err(e) => panic!("{e}"),
+    };
+    eprintln!("USD->EUR on 2024-03-08: {friday:?}");
+    assert_eq!(friday.rate_date, date(2024, 3, 8));
+    assert!(
+        (0.5..2.0).contains(&friday.rate),
+        "a plausible USD/EUR rate: {}",
+        friday.rate
+    );
+
+    let sunday = client.rate(date(2024, 3, 10), "USD", "EUR").await.unwrap();
+    eprintln!("USD->EUR on 2024-03-10 (a Sunday): {sunday:?}");
+    assert_eq!(
+        sunday.rate_date,
+        date(2024, 3, 8),
+        "the weekend uses Friday's rate"
+    );
+    assert_eq!(sunday.rate, friday.rate);
+
+    // A currency the ECB does not publish.
+    assert_eq!(
+        client.rate(date(2024, 3, 8), "BTC", "EUR").await,
+        Err(FxError::Unsupported("BTC".into()))
+    );
+    // Another base currency works the same way.
+    let gbp = client.rate(date(2024, 3, 8), "GBP", "USD").await.unwrap();
+    assert!((0.5..3.0).contains(&gbp.rate), "{gbp:?}");
+}

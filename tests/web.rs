@@ -1866,3 +1866,345 @@ async fn the_project_list_shows_the_last_donation() {
     assert!(html.contains("3mo ago"));
     assert!(html.contains("never"), "projects nobody donated to");
 }
+
+// --- exchange rates ---
+
+use wiremock::matchers::{method, path, query_param};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+fn rate_answer(base: &str, day: &str, rate: f64) -> serde_json::Value {
+    serde_json::json!({"amount": 1.0, "base": base, "date": day, "rates": {"EUR": rate}})
+}
+
+async fn rate_on(server: &MockServer, day: &str, currency: &str, response: ResponseTemplate) {
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/{day}")))
+        .and(query_param("base", currency))
+        .respond_with(response)
+        .mount(server)
+        .await;
+}
+
+async fn first_donation(h: &Harness, project: &str) -> donarium::model::Donation {
+    h.store
+        .list_donations(Some(project))
+        .await
+        .unwrap()
+        .remove(0)
+}
+
+#[tokio::test]
+async fn a_foreign_donation_is_converted_with_the_ecb_rate() {
+    let fx = MockServer::start().await;
+    // 2026-09-20 is a Sunday: the service answers with Friday's rate.
+    rate_on(
+        &fx,
+        "2026-09-20",
+        "USD",
+        ResponseTemplate::new(200).set_body_json(rate_answer("USD", "2026-09-18", 0.8531)),
+    )
+    .await;
+    let h = harness_fx(false, &fx.uri()).await;
+    let admin = session_cookie(&h.key, &session(true));
+    let res = h
+        .app
+        .clone()
+        .oneshot(post(
+            "/donations",
+            &admin,
+            &donation_form("csrf-token", &[("amount", "10.00"), ("currency", "USD")]),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert!(
+        res.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .contains("notice=recorded")
+    );
+    let c = first_donation(&h, "tokio-rs-axum")
+        .await
+        .conversion
+        .unwrap();
+    assert_eq!(
+        (c.base_minor, c.rate, c.source),
+        (853, 0.8531, donarium::model::FxSource::Ecb)
+    );
+
+    // The page shows the converted amount and where the rate came from.
+    let res = h
+        .app
+        .oneshot(get("/donations?project=tokio-rs-axum", &admin))
+        .await
+        .unwrap();
+    let html = body(res).await;
+    assert!(html.contains("≈ 8.53 EUR"), "{html}");
+    assert!(html.contains("ECB rate: 1 USD = 0.8531 EUR"));
+    assert!(!html.contains("conversion pending"));
+}
+
+#[tokio::test]
+async fn a_rate_typed_by_hand_wins_over_the_service() {
+    let fx = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&fx)
+        .await;
+    let h = harness_fx(false, &fx.uri()).await;
+    let admin = session_cookie(&h.key, &session(true));
+    h.app
+        .clone()
+        .oneshot(post(
+            "/donations",
+            &admin,
+            &donation_form(
+                "csrf-token",
+                &[("amount", "10.00"), ("currency", "USD"), ("rate", "0.9")],
+            ),
+        ))
+        .await
+        .unwrap();
+    let c = first_donation(&h, "tokio-rs-axum")
+        .await
+        .conversion
+        .unwrap();
+    assert_eq!(
+        (c.base_minor, c.source),
+        (900, donarium::model::FxSource::Manual)
+    );
+}
+
+#[tokio::test]
+async fn when_the_service_is_down_the_donation_is_kept_and_converted_later() {
+    let fx = MockServer::start().await;
+    rate_on(&fx, "2026-09-20", "USD", ResponseTemplate::new(503)).await;
+    let h = harness_fx(false, &fx.uri()).await;
+    let admin = session_cookie(&h.key, &session(true));
+    let res = h
+        .app
+        .clone()
+        .oneshot(post(
+            "/donations",
+            &admin,
+            &donation_form("csrf-token", &[("amount", "10.00"), ("currency", "USD")]),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::SEE_OTHER,
+        "recording is not blocked"
+    );
+    assert!(
+        res.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .contains("notice=pending-later")
+    );
+    assert_eq!(first_donation(&h, "tokio-rs-axum").await.conversion, None);
+
+    let res = h
+        .app
+        .clone()
+        .oneshot(get(
+            "/donations?notice=pending-later&project=tokio-rs-axum",
+            &admin,
+        ))
+        .await
+        .unwrap();
+    let html = body(res).await;
+    assert!(html.contains("could not be reached"));
+    assert!(html.contains("conversion pending"));
+    assert!(html.contains("Set rate"));
+
+    // The service comes back, and the background task fills it in.
+    fx.reset().await;
+    rate_on(
+        &fx,
+        "2026-09-20",
+        "USD",
+        ResponseTemplate::new(200).set_body_json(rate_answer("USD", "2026-09-18", 0.8)),
+    )
+    .await;
+    assert_eq!(h.fx.fill_pending(&h.store).await.unwrap(), 1);
+    let c = first_donation(&h, "tokio-rs-axum")
+        .await
+        .conversion
+        .unwrap();
+    assert_eq!(
+        (c.base_minor, c.source),
+        (800, donarium::model::FxSource::Ecb)
+    );
+    let metrics = h
+        .ops
+        .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let text = body(metrics).await;
+    assert!(
+        text.contains("donarium_fx_requests_total{result=\"ok\"} 1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("donarium_fx_requests_total{result=\"error\"} 1"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn an_unsupported_currency_is_set_by_hand_and_only_once() {
+    let fx = MockServer::start().await;
+    rate_on(&fx, "2026-09-20", "BTC", ResponseTemplate::new(404)).await;
+    let h = harness_fx(false, &fx.uri()).await;
+    let admin = session_cookie(&h.key, &session(true));
+    let res = h
+        .app
+        .clone()
+        .oneshot(post(
+            "/donations",
+            &admin,
+            &donation_form("csrf-token", &[("amount", "0.01"), ("currency", "BTC")]),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        res.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .contains("notice=pending-unsupported")
+    );
+    let donation = first_donation(&h, "tokio-rs-axum").await;
+    assert_eq!(donation.conversion, None);
+    let id = donation.id;
+
+    let set = |rate: &str| {
+        post(
+            &format!("/donations/{id}/rate"),
+            &admin,
+            &[
+                ("_csrf", "csrf-token"),
+                ("rate", rate),
+                ("project", "tokio-rs-axum"),
+            ],
+        )
+    };
+    // A bad rate changes nothing.
+    for bad in ["", "abc", "0", "-3"] {
+        let res = h.app.clone().oneshot(set(bad)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY, "{bad:?}");
+    }
+    assert_eq!(first_donation(&h, "tokio-rs-axum").await.conversion, None);
+
+    // 0.01 BTC at 50000 EUR is 500.00 EUR.
+    let res = h.app.clone().oneshot(set("50000")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert!(
+        res.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .contains("notice=rated")
+    );
+    let c = first_donation(&h, "tokio-rs-axum")
+        .await
+        .conversion
+        .unwrap();
+    assert_eq!(
+        (c.base_minor, c.source),
+        (50_000, donarium::model::FxSource::Manual)
+    );
+
+    // A conversion is never changed afterwards.
+    let res = h.app.clone().oneshot(set("1")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    assert!(body(res).await.contains("already has its amount"));
+    assert_eq!(
+        first_donation(&h, "tokio-rs-axum")
+            .await
+            .conversion
+            .unwrap()
+            .base_minor,
+        50_000
+    );
+
+    // The currency is not asked about again for another donation.
+    fx.verify().await;
+}
+
+#[tokio::test]
+async fn rates_off_means_pending_with_a_clear_message() {
+    let h = harness(false).await; // no rate service
+    let admin = session_cookie(&h.key, &session(true));
+    let res = h
+        .app
+        .clone()
+        .oneshot(post(
+            "/donations",
+            &admin,
+            &donation_form("csrf-token", &[("amount", "10.00"), ("currency", "USD")]),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        res.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .contains("notice=pending-off")
+    );
+    let res = h
+        .app
+        .oneshot(get("/donations?notice=pending-off", &admin))
+        .await
+        .unwrap();
+    assert!(body(res).await.contains("Exchange rates are turned off"));
+}
+
+#[tokio::test]
+async fn setting_a_rate_needs_admin_csrf_and_origin() {
+    let h = harness(false).await;
+    let admin = session_cookie(&h.key, &session(true));
+    let reader = session_cookie(&h.key, &session(false));
+    // The demo has one pending donation: 2000 JPY to paperless.
+    let pending = h.store.pending_conversions(10).await.unwrap().remove(0);
+    let path = format!("/donations/{}/rate", pending.id);
+    let send = |cookie: &str, origin: Option<&str>, csrf: &str| {
+        form_post(
+            &path,
+            cookie,
+            origin,
+            &encode(&[("_csrf", csrf), ("rate", "0.006")]),
+        )
+    };
+    let r = |req| h.app.clone().oneshot(req);
+    assert_eq!(
+        r(send(&reader, Some(ORIGIN), "csrf-token"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        r(send(&admin, Some(ORIGIN), "wrong"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        r(send(&admin, None, "csrf-token")).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(h.store.pending_conversions(10).await.unwrap().len(), 1);
+    // And a donation that does not exist.
+    let res = h
+        .app
+        .oneshot(post(
+            "/donations/9999/rate",
+            &admin,
+            &[("_csrf", "csrf-token"), ("rate", "1")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}

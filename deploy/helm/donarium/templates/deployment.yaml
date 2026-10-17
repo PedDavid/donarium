@@ -61,6 +61,12 @@ spec:
             {{- end }}
             - name: DONARIUM_BASE_CURRENCY
               value: {{ .Values.baseCurrency | quote }}
+            - name: DONARIUM_FX_URL
+              value: {{ .Values.fx.url | quote }}
+            {{- if .Values.fx.disabled }}
+            - name: DONARIUM_FX_DISABLED
+              value: "true"
+            {{- end }}
             - name: DONARIUM_SCAN_INTERVAL
               value: {{ .Values.scanInterval | quote }}
             {{- with .Values.registryAllow }}

@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use prometheus_client::encoding::EncodeLabelSet;
+use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
@@ -22,6 +23,16 @@ struct ProjectLabels {
 struct SourceLabels {
     state: String,
 }
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct ResultLabels {
+    pub result: String,
+}
+
+/// Every `result` an exchange rate lookup can end in. Each series is created at
+/// 0 on startup: `increase()` ignores a counter's first sample, so a series that
+/// first appears at 1 would hide the first lookup after every restart.
+pub const FX_RESULTS: [&str; 4] = ["ok", "unsupported", "rate_limited", "error"];
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct CurrencyLabels {
@@ -47,6 +58,8 @@ pub struct Metrics {
     donations: Gauge,
     unconverted: Gauge,
     last_donation: Family<ProjectLabels, Gauge>,
+    /// Exchange rate lookups by result (shared with [`crate::fx::Fx`]).
+    pub fx_requests: Family<ResultLabels, Counter>,
     /// Held from refresh to encode, so a scrape never sees a half-built state.
     scrape: Mutex<()>,
 }
@@ -108,7 +121,19 @@ impl Metrics {
             "Unix time of the last donation to a project (the day, at 00:00 UTC)",
             last_donation.clone(),
         );
+        let fx_requests = Family::<ResultLabels, Counter>::default();
+        for result in FX_RESULTS {
+            let _ = fx_requests.get_or_create(&ResultLabels {
+                result: result.into(),
+            });
+        }
+        registry.register(
+            "donarium_fx_requests",
+            "Exchange rate lookups by result (ok, unsupported, rate_limited, error)",
+            fx_requests.clone(),
+        );
         Arc::new(Metrics {
+            fx_requests,
             registry,
             usage,
             sources,

@@ -12,7 +12,9 @@ It never moves money: you donate on the project's own page, then record it.
 > repositories to scan) in the UI. Sources on GitLab, GitHub and Gitea/Forgejo
 > can be scanned for the container images in their Docker Compose and
 > Kubernetes (Flux) files.
-> Dependency scans, ranking, donations and receipts are next. See [docs/PLAN.md](docs/PLAN.md) for the full design and
+> Projects can also be added by hand, and donations are recorded with their
+> receipts' amounts converted to a base currency. Dependency scans, ranking and
+> receipts are next. See [docs/PLAN.md](docs/PLAN.md) for the full design and
 > milestones.
 
 ## Try it
@@ -33,6 +35,29 @@ CRDs and the app needs no Kubernetes API access.
 
 Back the volume up: donations (and your sources) can't be rebuilt, only scan
 results can. The chart keeps the claim when the release is uninstalled.
+
+## Donations
+
+You donate on a project's own page, then record it here (admins only). Each
+donation keeps what was paid, exactly, in the currency it was paid in.
+
+- **Append-only.** Donations are never edited or deleted: the database refuses
+  both. A mistake is *voided*, which keeps it in the history, marked, and stops it
+  counting. A project with donations cannot be deleted.
+- **Base currency.** Totals are kept in `--base-currency` (default `EUR`). It is
+  fixed for a database the first time it is used.
+- **Conversion.** A donation in another currency is converted once, when it is
+  recorded, with the European Central Bank's rate for the day it was made, from a
+  [Frankfurter](https://frankfurter.dev) server (`--fx-url`). A weekend or holiday
+  uses the previous business day's rate. You can type the rate instead, for what
+  the card was really charged.
+  - If the service cannot be reached, the donation is still recorded, marked
+    *conversion pending*, and filled in automatically (hourly).
+  - For a currency the ECB does not publish (crypto, say), or with
+    `--fx-disabled`, an admin sets the rate on the donation, once.
+  - This is a tracking aid. The receipt and your bank statement are the source of
+    truth; it is not tax advice.
+- `--step-up-max-age` makes recording and voiding require a recent login.
 
 ## Scanning
 

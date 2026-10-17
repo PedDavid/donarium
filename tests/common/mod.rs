@@ -13,6 +13,7 @@ use http_body_util::BodyExt;
 
 use donarium::config::Config;
 use donarium::demo;
+use donarium::fx::{Fx, FxClient};
 use donarium::metrics::Metrics;
 use donarium::model::Provider;
 use donarium::scan::fetch::ArchiveFetcher;
@@ -32,27 +33,44 @@ pub struct Harness {
     pub ops: Router,
     pub store: Arc<Store>,
     pub scanner: Arc<Scanner>,
+    pub fx: Arc<Fx>,
     pub key: Key,
 }
 
 /// The app with the demo projects. With `dev_auth` every visitor is logged in
 /// as an admin; without it, OIDC is configured and visitors must log in.
 pub async fn harness(dev_auth: bool) -> Harness {
-    harness_with(dev_auth, None, &[]).await
+    harness_with(dev_auth, None, &[], None).await
 }
 
 /// [`harness`] with extra command-line flags, e.g. `--gitea-url`.
 pub async fn harness_args(dev_auth: bool, extra: &[&str]) -> Harness {
-    harness_with(dev_auth, None, extra).await
+    harness_with(dev_auth, None, extra, None).await
+}
+
+/// [`harness`] where exchange rates come from the mock server at `fx_url`.
+pub async fn harness_fx(dev_auth: bool, fx_url: &str) -> Harness {
+    harness_with(dev_auth, None, &[], Some(fx_url.to_string())).await
 }
 
 /// Like [`harness`] with dev auth, but scans read GitLab from `gitlab` and
 /// image labels from `registry` (base URLs of mock servers).
 pub async fn harness_scanning(gitlab: &str, registry: &str) -> Harness {
-    harness_with(true, Some((gitlab.to_string(), registry.to_string())), &[]).await
+    harness_with(
+        true,
+        Some((gitlab.to_string(), registry.to_string())),
+        &[],
+        None,
+    )
+    .await
 }
 
-async fn harness_with(dev_auth: bool, mocks: Option<(String, String)>, extra: &[&str]) -> Harness {
+async fn harness_with(
+    dev_auth: bool,
+    mocks: Option<(String, String)>,
+    extra: &[&str],
+    fx_url: Option<String>,
+) -> Harness {
     let mut args = vec!["donarium"];
     args.extend_from_slice(extra);
     if dev_auth {
@@ -85,13 +103,27 @@ async fn harness_with(dev_auth: bool, mocks: Option<(String, String)>, extra: &[
         ),
         None => Scanner::new(store.clone(), vec![], RegistryClient::new(vec![]).unwrap()),
     });
-    let state =
-        AppState::new(cfg, store.clone(), scanner.clone(), auth, key.clone()).with_fixed_now(now);
+    // Without a mock there is no rate service: foreign donations stay pending.
+    let fx = Fx::new(
+        fx_url.map(|u| FxClient::new(u.parse().unwrap()).unwrap()),
+        "EUR".into(),
+        metrics.fx_requests.clone(),
+    );
+    let state = AppState::new(
+        cfg,
+        store.clone(),
+        scanner.clone(),
+        fx.clone(),
+        auth,
+        key.clone(),
+    )
+    .with_fixed_now(now);
     Harness {
         app: router(state),
         ops: ops_router(store.clone(), metrics, "EUR".to_string()),
         store,
         scanner,
+        fx,
         key,
     }
 }

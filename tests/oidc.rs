@@ -26,6 +26,7 @@ use wiremock::matchers::path;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use donarium::config::Config;
+use donarium::fx::Fx;
 use donarium::scan::registry::RegistryClient;
 use donarium::scan::run::Scanner;
 use donarium::store::Store;
@@ -122,7 +123,8 @@ async fn app(idp: &Idp, key: &Key) -> Router {
         vec![],
         RegistryClient::new(vec![]).unwrap(),
     ));
-    router(AppState::new(cfg, store, scanner, auth, key.clone()))
+    let fx = Fx::new(None, "EUR".into(), Default::default());
+    router(AppState::new(cfg, store, scanner, fx, auth, key.clone()))
 }
 
 fn set_cookie(res: &axum::response::Response, name: &str) -> String {

@@ -25,6 +25,7 @@ use rust_embed::RustEmbed;
 use tower_http::trace::TraceLayer;
 
 use crate::config::Config;
+use crate::fx::Fx;
 use crate::metrics::Metrics;
 use crate::scan::run::Scanner;
 use crate::store::{Store, StoreError};
@@ -39,6 +40,7 @@ pub struct Inner {
     pub cfg: Config,
     pub store: Arc<Store>,
     pub scanner: Arc<Scanner>,
+    pub fx: Arc<Fx>,
     pub auth: AuthMode,
     pub cookie_key: Key,
     pub asset_version: String,
@@ -51,6 +53,7 @@ impl AppState {
         cfg: Config,
         store: Arc<Store>,
         scanner: Arc<Scanner>,
+        fx: Arc<Fx>,
         auth: AuthMode,
         cookie_key: Key,
     ) -> Self {
@@ -59,6 +62,7 @@ impl AppState {
                 cfg,
                 store,
                 scanner,
+                fx,
                 auth,
                 cookie_key,
                 asset_version: asset_version(),
@@ -242,6 +246,7 @@ pub fn router(state: AppState) -> Router {
         .route("/search", get(pages::search))
         .route("/donations", get(donations::index).post(donations::record))
         .route("/donations/{id}/void", post(donations::void))
+        .route("/donations/{id}/rate", post(donations::set_rate))
         .route("/projects", post(projects::create))
         .route(
             "/projects/{name}",

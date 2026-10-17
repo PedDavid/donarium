@@ -23,7 +23,17 @@
         <td class="whitespace-nowrap">
           <span{% if !d.voided.is_empty() %} class="line-through"{% endif %}>{{ d.amount }}</span>
           {% if !d.base.is_empty() %}<div class="text-xs text-muted-foreground" title="{{ d.base_how }}">{{ d.base }}</div>{% endif %}
-          {% if d.pending %}<div class="text-xs"><span class="badge" data-variant="secondary" title="The amount in the base currency has not been worked out yet">conversion pending</span></div>{% endif %}
+          {% if d.pending %}
+          <div class="text-xs"><span class="badge" data-variant="secondary" title="The amount in the base currency has not been worked out yet">conversion pending</span></div>
+          {% if layout.admin && d.voided.is_empty() %}
+          <form method="post" action="/donations/{{ d.id }}/rate" class="mt-1 flex items-center gap-1" autocomplete="off">
+            <input type="hidden" name="_csrf" value="{{ layout.csrf }}">
+            <input type="hidden" name="project" value="{{ filter }}">
+            <input type="text" class="input" name="rate" inputmode="decimal" placeholder="rate" aria-label="Rate for donation {{ d.id }}" required spellcheck="false" size="7">
+            <button type="submit" class="btn" data-variant="outline" data-size="sm" title="How many units of the base currency one unit of this currency was worth">Set rate</button>
+          </form>
+          {% endif %}
+          {% endif %}
           {% if !d.voided.is_empty() %}<div class="text-xs"><span class="badge" data-variant="destructive">voided</span> {{ d.voided }}</div>{% endif %}
         </td>
         <td class="hidden md:table-cell">

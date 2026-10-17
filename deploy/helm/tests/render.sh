@@ -77,6 +77,14 @@ env=$(render | yq 'select(.kind == "Deployment") | .spec.template.spec.container
 env=$(render --set baseCurrency=USD | yq 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env')
 [[ $(yq '.[] | select(.name == "DONARIUM_BASE_CURRENCY") | .value' <<<"$env") == USD ]] || fail "baseCurrency is not passed"
 
+# Exchange rates: the service URL is always passed, and they can be turned off.
+env=$(render | yq 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env')
+[[ $(yq '.[] | select(.name == "DONARIUM_FX_URL") | .value' <<<"$env") == https://api.frankfurter.dev ]] || fail "the exchange rate URL default is wrong"
+[[ -z $(yq '.[] | select(.name == "DONARIUM_FX_DISABLED")' <<<"$env") ]] || fail "rates are disabled by default"
+env=$(render --set fx.disabled=true --set fx.url=https://rates.example.com | yq 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env')
+[[ $(yq '.[] | select(.name == "DONARIUM_FX_DISABLED") | .value' <<<"$env") == true ]] || fail "fx.disabled is not passed"
+[[ $(yq '.[] | select(.name == "DONARIUM_FX_URL") | .value' <<<"$env") == https://rates.example.com ]] || fail "fx.url is not passed"
+
 # The default image tag is the chart's appVersion, which the release
 # workflow publishes (see .github/workflows/release.yml).
 app=$(yq '.appVersion' "$chart/Chart.yaml")

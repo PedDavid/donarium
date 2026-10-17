@@ -11,6 +11,7 @@ use sqlx::sqlite::{
 };
 use sqlx::{Row, SqlitePool};
 
+use crate::fx::Rate;
 use crate::model::{
     Actor, Conversion, Donation, DonationKind, Funding, FxSource, NewDonation, NewSource, Origin,
     Project, ProjectUpdate, Provider, ScanMethod, Source, SourceUpdate, TRANSITIVE_FACTOR, Totals,
@@ -749,6 +750,99 @@ impl Store {
         Ok(totals)
     }
 
+    // --- exchange rates ---
+
+    /// A rate fetched earlier for this day, currency and base.
+    pub async fn cached_rate(
+        &self,
+        date: jiff::civil::Date,
+        currency: &str,
+        base: &str,
+    ) -> Result<Option<f64>, StoreError> {
+        Ok(sqlx::query_scalar(
+            "SELECT rate FROM fx_rate WHERE date = ? AND currency = ? AND base = ?",
+        )
+        .bind(date.to_string())
+        .bind(currency)
+        .bind(base)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    pub async fn save_rate(
+        &self,
+        date: jiff::civil::Date,
+        currency: &str,
+        base: &str,
+        rate: &Rate,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO fx_rate (date, currency, base, rate, rate_date) VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (date, currency, base) DO NOTHING",
+        )
+        .bind(date.to_string())
+        .bind(currency)
+        .bind(base)
+        .bind(rate.rate)
+        .bind(rate.rate_date.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Donations that count and are still waiting for their amount in the
+    /// base currency, oldest first.
+    pub async fn pending_conversions(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<PendingConversion>, StoreError> {
+        sqlx::query(
+            "SELECT d.id, d.amount_minor, d.currency, d.donated_on
+               FROM donation d
+              WHERE d.base_amount_minor IS NULL AND d.voids_id IS NULL
+                AND NOT EXISTS (SELECT 1 FROM donation v WHERE v.voids_id = d.id)
+              ORDER BY d.donated_on, d.id LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|r| {
+            let day: String = r.try_get("donated_on")?;
+            Ok(PendingConversion {
+                id: r.try_get("id")?,
+                amount_minor: r.try_get("amount_minor")?,
+                currency: r.try_get("currency")?,
+                donated_on: day.parse().map_err(|_| corrupt("donated_on", &day))?,
+            })
+        })
+        .collect()
+    }
+
+    /// Fills in a pending conversion. This is the one change a donation allows,
+    /// and only once: a donation that already has its base amount is refused.
+    pub async fn set_conversion(&self, id: i64, conversion: &Conversion) -> Result<(), StoreError> {
+        let done = sqlx::query(
+            "UPDATE donation SET base_amount_minor = ?, fx_rate = ?, fx_source = ?
+              WHERE id = ? AND base_amount_minor IS NULL AND voids_id IS NULL",
+        )
+        .bind(conversion.base_minor)
+        .bind(conversion.rate)
+        .bind(conversion.source.as_str())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if done.rows_affected() == 0 {
+            return match self.get_donation(id).await? {
+                None => Err(StoreError::NotFound),
+                Some(_) => Err(StoreError::InUse(
+                    "this donation is already converted".into(),
+                )),
+            };
+        }
+        Ok(())
+    }
+
     // --- projects ---
 
     /// All projects, ordered by name. The usage score is what enabled sources
@@ -1070,6 +1164,15 @@ async fn upsert_project(
     .bind(stamp)
     .fetch_one(&mut *tx)
     .await?)
+}
+
+/// A donation waiting for its amount in the base currency.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingConversion {
+    pub id: i64,
+    pub amount_minor: i64,
+    pub currency: String,
+    pub donated_on: jiff::civil::Date,
 }
 
 /// An image repository to ask its registry about.
