@@ -13,9 +13,9 @@ use sqlx::{Row, SqlitePool};
 
 use crate::fx::Rate;
 use crate::model::{
-    Actor, Conversion, Donation, DonationKind, Funding, FxSource, NewDonation, NewSource, Origin,
-    Project, ProjectUpdate, Provider, Receipt, ScanMethod, Source, SourceUpdate, TRANSITIVE_FACTOR,
-    Totals,
+    Actor, Conversion, Donation, DonationKind, Funding, FxSource, NewDonation, NewSource,
+    NewUpload, Origin, Project, ProjectUpdate, Provider, Receipt, ReceiptStore, ScanMethod, Source,
+    SourceUpdate, TRANSITIVE_FACTOR, Totals,
 };
 use crate::scan::manifests::{ImageUse, Skipped};
 use crate::scan::resolve::slug;
@@ -670,22 +670,61 @@ impl Store {
         Ok(())
     }
 
+    /// Records a file kept in the S3 bucket as a donation's receipt.
+    pub async fn add_upload(
+        &self,
+        donation_id: i64,
+        upload: &NewUpload,
+        by: &Actor,
+        now: Timestamp,
+    ) -> Result<(), StoreError> {
+        let donation = self
+            .get_donation(donation_id)
+            .await?
+            .ok_or(StoreError::NotFound)?;
+        if donation.voided.is_some() {
+            return Err(StoreError::InUse(
+                "a voided donation cannot get a receipt".into(),
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO receipt (donation_id, store, reference, title, content_type, size_bytes, sha256, linked_by, linked_at)
+             VALUES (?, 's3', ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(donation_id)
+        .bind(&upload.key)
+        .bind(&upload.filename)
+        .bind(&upload.content_type)
+        .bind(upload.size)
+        .bind(&upload.sha256)
+        .bind(&by.sub)
+        .bind(now.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    const RECEIPT_SELECT: &str =
+        "SELECT id, donation_id, store, reference, title, content_type, linked_by FROM receipt";
+
     /// Every linked receipt, for showing next to the donations.
     pub async fn list_receipts(&self) -> Result<Vec<Receipt>, StoreError> {
-        sqlx::query("SELECT id, donation_id, reference, title, linked_by FROM receipt ORDER BY id")
+        sqlx::query(&format!("{} ORDER BY id", Self::RECEIPT_SELECT))
             .fetch_all(&self.pool)
             .await?
             .iter()
-            .map(|r| {
-                Ok(Receipt {
-                    id: r.try_get("id")?,
-                    donation_id: r.try_get("donation_id")?,
-                    reference: r.try_get("reference")?,
-                    title: r.try_get("title")?,
-                    linked_by: r.try_get("linked_by")?,
-                })
-            })
+            .map(receipt_from_row)
             .collect()
+    }
+
+    pub async fn get_receipt(&self, id: i64) -> Result<Option<Receipt>, StoreError> {
+        sqlx::query(&format!("{} WHERE id = ?", Self::RECEIPT_SELECT))
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .map(receipt_from_row)
+            .transpose()
     }
 
     /// Cancels a donation with a void entry. The donation stays in the history,
@@ -1313,6 +1352,27 @@ fn corrupt(what: &str, value: &str) -> StoreError {
 fn timestamp(row: &SqliteRow, column: &str) -> Result<Timestamp, StoreError> {
     let raw: String = row.try_get(column)?;
     raw.parse().map_err(|_| corrupt(column, &raw))
+}
+
+fn receipt_from_row(row: &SqliteRow) -> Result<Receipt, StoreError> {
+    let store: String = row.try_get("store")?;
+    Ok(Receipt {
+        id: row.try_get("id")?,
+        donation_id: row.try_get("donation_id")?,
+        store: match store.as_str() {
+            "paperless" => ReceiptStore::Paperless,
+            "s3" => ReceiptStore::S3,
+            other => {
+                return Err(StoreError::Corrupt(format!(
+                    "unknown receipt store {other:?}"
+                )));
+            }
+        },
+        reference: row.try_get("reference")?,
+        title: row.try_get("title")?,
+        content_type: row.try_get("content_type")?,
+        linked_by: row.try_get("linked_by")?,
+    })
 }
 
 fn donation_from_row(row: &SqliteRow) -> Result<Donation, StoreError> {
@@ -2039,6 +2099,49 @@ mod tests {
             store.link_receipt(9999, "1", "", &actor(), now()).await,
             Err(StoreError::NotFound)
         ));
+    }
+
+    #[tokio::test]
+    async fn uploaded_files_are_receipts_too() {
+        let store = store_with_project().await;
+        let d = store
+            .record_donation(
+                &donation("tokio-rs-tokio", 1000, "EUR", date(2026, 3, 1), Some(1000)),
+                &actor(),
+                now(),
+            )
+            .await
+            .unwrap();
+        store
+            .link_receipt(d.id, "42", "From Paperless", &actor(), now())
+            .await
+            .unwrap();
+        let upload = NewUpload {
+            key: "receipts/2026/1/abc-r.pdf".into(),
+            filename: "r.pdf".into(),
+            content_type: "application/pdf".into(),
+            size: 12,
+            sha256: "abc".into(),
+        };
+        store
+            .add_upload(d.id, &upload, &actor(), now())
+            .await
+            .unwrap();
+        // The same object cannot be recorded twice.
+        assert!(
+            store
+                .add_upload(d.id, &upload, &actor(), now())
+                .await
+                .is_err()
+        );
+        let all = store.list_receipts().await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].store, ReceiptStore::Paperless);
+        let file = store.get_receipt(all[1].id).await.unwrap().unwrap();
+        assert_eq!(file.store, ReceiptStore::S3);
+        assert_eq!(file.reference, "receipts/2026/1/abc-r.pdf");
+        assert_eq!(file.content_type.as_deref(), Some("application/pdf"));
+        assert!(store.get_receipt(999).await.unwrap().is_none());
     }
 
     #[tokio::test]

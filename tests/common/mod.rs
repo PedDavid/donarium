@@ -59,6 +59,26 @@ pub async fn harness_paperless(url: &str) -> Harness {
     .await
 }
 
+/// [`harness`] with uploads going to the mock S3 service at `url`.
+pub async fn harness_s3(url: &str) -> Harness {
+    harness_with(
+        false,
+        None,
+        &[
+            "--s3-endpoint",
+            url,
+            "--s3-bucket",
+            "receipts",
+            "--s3-access-key-file",
+            "/unused",
+            "--s3-secret-key-file",
+            "/unused",
+        ],
+        None,
+    )
+    .await
+}
+
 /// [`harness`] where exchange rates come from the mock server at `fx_url`.
 pub async fn harness_fx(dev_auth: bool, fx_url: &str) -> Harness {
     harness_with(dev_auth, None, &[], Some(fx_url.to_string())).await
@@ -96,6 +116,7 @@ async fn harness_with(
     }
     let cfg = Config::try_parse_from(args).unwrap();
     let cfg_paperless = cfg.paperless_url.clone();
+    let cfg_s3 = cfg.s3_endpoint.clone().zip(cfg.s3_bucket.clone());
     let now: jiff::Timestamp = NOW.parse().unwrap();
     let store = Arc::new(Store::memory().await.unwrap());
     demo::seed(&store, now).await.unwrap();
@@ -131,6 +152,20 @@ async fn harness_with(
     )
     .with_fixed_now(now);
     // The token file is never read here: the mock accepts a fixed token.
+    let state = match &cfg_s3 {
+        Some((endpoint, bucket)) => state.with_s3(
+            donarium::s3::S3::new(donarium::s3::S3Config {
+                endpoint: endpoint.clone(),
+                region: "eu-west-1".into(),
+                bucket: bucket.clone(),
+                access_key: "AK".into(),
+                secret_key: "SK".into(),
+                sse: false,
+            })
+            .unwrap(),
+        ),
+        None => state,
+    };
     let state = match &cfg_paperless {
         Some(url) => state.with_paperless(
             donarium::receipts::Paperless::new(url.clone(), "test-token".into()).unwrap(),

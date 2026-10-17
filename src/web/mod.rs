@@ -29,6 +29,7 @@ use crate::config::Config;
 use crate::fx::Fx;
 use crate::metrics::Metrics;
 use crate::receipts::Paperless;
+use crate::s3::S3;
 use crate::scan::run::Scanner;
 use crate::store::{Store, StoreError};
 use auth::AuthMode;
@@ -45,6 +46,8 @@ pub struct Inner {
     pub fx: Arc<Fx>,
     /// Where receipts are found, if Paperless is configured.
     pub paperless: Option<Paperless>,
+    /// Where uploaded receipts are kept, if S3 is configured.
+    pub s3: Option<S3>,
     pub auth: AuthMode,
     pub cookie_key: Key,
     pub asset_version: String,
@@ -68,6 +71,7 @@ impl AppState {
                 scanner,
                 fx,
                 paperless: None,
+                s3: None,
                 auth,
                 cookie_key,
                 asset_version: asset_version(),
@@ -80,6 +84,13 @@ impl AppState {
         Arc::get_mut(&mut self.inner)
             .expect("Paperless is set before the state is shared")
             .paperless = Some(paperless);
+        self
+    }
+
+    pub fn with_s3(mut self, s3: S3) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("S3 is set before the state is shared")
+            .s3 = Some(s3);
         self
     }
 
@@ -263,6 +274,11 @@ pub fn router(state: AppState) -> Router {
             "/donations/{id}/receipt",
             get(receipts::search).post(receipts::link),
         )
+        .route(
+            "/donations/{id}/receipt/upload",
+            post(receipts::upload).layer(DefaultBodyLimit::max(receipts::MAX_UPLOAD + 64 * 1024)),
+        )
+        .route("/receipts/{id}/file", get(receipts::download))
         .route("/receipts/{id}/delete", post(receipts::unlink))
         .route("/projects", post(projects::create))
         .route(

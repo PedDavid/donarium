@@ -83,6 +83,33 @@ pub struct Config {
     )]
     pub paperless_token_file: Option<PathBuf>,
 
+    /// Endpoint of an S3-compatible service to keep uploaded receipts in, e.g.
+    /// https://s3.eu-west-1.amazonaws.com. Needs the other --s3-* flags.
+    #[arg(
+        long,
+        env = "DONARIUM_S3_ENDPOINT",
+        requires_all = ["s3_bucket", "s3_access_key_file", "s3_secret_key_file"]
+    )]
+    pub s3_endpoint: Option<Url>,
+
+    #[arg(long, env = "DONARIUM_S3_REGION", default_value = "us-east-1")]
+    pub s3_region: String,
+
+    #[arg(long, env = "DONARIUM_S3_BUCKET")]
+    pub s3_bucket: Option<String>,
+
+    /// File with the access key id.
+    #[arg(long, env = "DONARIUM_S3_ACCESS_KEY_FILE")]
+    pub s3_access_key_file: Option<PathBuf>,
+
+    /// File with the secret access key.
+    #[arg(long, env = "DONARIUM_S3_SECRET_KEY_FILE")]
+    pub s3_secret_key_file: Option<PathBuf>,
+
+    /// Ask the storage to encrypt uploads (server-side encryption, AES256).
+    #[arg(long, env = "DONARIUM_S3_SSE")]
+    pub s3_sse: bool,
+
     /// API URL of GitHub.
     #[arg(
         long,
@@ -218,6 +245,7 @@ impl Config {
             ("--gitlab-url", Some(&self.gitlab_url)),
             ("--gitea-url", self.gitea_url.as_ref()),
             ("--paperless-url", self.paperless_url.as_ref()),
+            ("--s3-endpoint", self.s3_endpoint.as_ref()),
             ("--github-api-url", Some(&self.github_api_url)),
             ("--fx-url", Some(&self.fx_url)),
         ] {
