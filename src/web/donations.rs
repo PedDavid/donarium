@@ -104,6 +104,50 @@ fn options<T: Into<String>>(
         .collect()
 }
 
+#[derive(Deserialize, Default)]
+pub struct ExportQuery {
+    /// A year to limit the file to; empty for everything.
+    #[serde(default)]
+    year: String,
+}
+
+/// The donations that count as a CSV file, everything or one year.
+pub async fn export(
+    State(state): State<AppState>,
+    User(_session): User,
+    Query(q): Query<ExportQuery>,
+) -> Result<Response, AppError> {
+    let year = match q.year.trim() {
+        "" => None,
+        y => Some(
+            y.parse::<i16>()
+                .ok()
+                .filter(|y| (1900..=9999).contains(y))
+                .ok_or_else(|| AppError::BadRequest("the year must be like 2026".into()))?,
+        ),
+    };
+    let donations = state.inner.store.list_donations(None).await?;
+    let csv = crate::export::donations_csv(&donations, &state.inner.cfg.base_currency, year);
+    let name = match year {
+        Some(y) => format!("donarium-donations-{y}.csv"),
+        None => "donarium-donations.csv".into(),
+    };
+    Ok((
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/csv; charset=utf-8".to_string(),
+            ),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{name}\""),
+            ),
+        ],
+        csv,
+    )
+        .into_response())
+}
+
 pub async fn index(
     State(state): State<AppState>,
     User(session): User,
