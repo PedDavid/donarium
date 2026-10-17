@@ -14,7 +14,7 @@ use super::auth::{Admin, Session, User};
 use super::pages::Layout;
 use super::views::{SourceRow, fmt_weight};
 use super::{AppError, AppState};
-use crate::model::{NewSource, Provider, ScanMethod, SourceUpdate};
+use crate::model::{ForgeHosts, NewSource, Provider, ScanMethod, SourceUpdate};
 use crate::scan::manifests::Skipped;
 use crate::scan::resolve::parse_project_repo;
 use crate::scan::usage::How;
@@ -48,8 +48,10 @@ pub struct SelectOption {
     pub selected: bool,
 }
 
-fn provider_options(selected: &str) -> Vec<SelectOption> {
-    Provider::ALL
+/// The providers that can be used on this server (Gitea needs `--gitea-url`).
+fn provider_options(hosts: &ForgeHosts, selected: &str) -> Vec<SelectOption> {
+    hosts
+        .available()
         .iter()
         .map(|p| SelectOption {
             value: p.as_str(),
@@ -151,6 +153,7 @@ async fn render_index(
     feedback: Feedback,
 ) -> Result<Response, AppError> {
     let now = ctx.state.now();
+    let hosts = ctx.state.inner.cfg.forge_hosts();
     let rows = ctx
         .state
         .inner
@@ -158,13 +161,13 @@ async fn render_index(
         .list_sources()
         .await?
         .iter()
-        .map(|s| SourceRow::new(s, now))
+        .map(|s| SourceRow::new(s, now, &hosts))
         .collect();
     let page = SourcesPage {
         layout: Layout::new(ctx.state, ctx.session, ctx.jar, "Sources").section("sources"),
         rows,
         notice: feedback.notice,
-        providers: provider_options(&form.provider),
+        providers: provider_options(&ctx.state.inner.cfg.forge_hosts(), &form.provider),
         methods: method_options(&form.scan_method),
         form,
         error: feedback.error,
@@ -187,10 +190,14 @@ pub struct AddForm {
 }
 
 /// Turns the submitted fields into a [`NewSource`], or says what is wrong.
-fn parse_new(form: &AddForm) -> Result<NewSource, String> {
+fn parse_new(form: &AddForm, hosts: &ForgeHosts) -> Result<NewSource, String> {
     let provider = Provider::parse(&form.provider).ok_or("choose a provider")?;
+    let host = hosts.host(provider).ok_or(match provider {
+        Provider::Gitea => "no Gitea or Forgejo server is configured on this server (--gitea-url)",
+        _ => "that provider is not available",
+    })?;
     let scan_method = ScanMethod::parse(&form.scan_method).ok_or("choose a scan method")?;
-    let repo = parse_repo(provider, &form.repo).map_err(|e| e.to_string())?;
+    let repo = parse_repo(provider, &host, &form.repo).map_err(|e| e.to_string())?;
     let weight = parse_weight(&form.weight).map_err(|e| e.to_string())?;
     Ok(NewSource {
         provider,
@@ -220,7 +227,7 @@ pub async fn create(
         session: &session,
         jar: &jar,
     };
-    let new = match parse_new(&form) {
+    let new = match parse_new(&form, &state.inner.cfg.forge_hosts()) {
         Ok(new) => new,
         Err(error) => {
             let rejected = Feedback::rejected(error, StatusCode::UNPROCESSABLE_ENTITY);
@@ -342,7 +349,7 @@ async fn render_detail(
     let page = DetailPage {
         layout: Layout::new(ctx.state, ctx.session, ctx.jar, source.repo.clone())
             .section("sources"),
-        source: SourceRow::new(source, ctx.state.now()),
+        source: SourceRow::new(source, ctx.state.now(), &ctx.state.inner.cfg.forge_hosts()),
         notice: feedback.notice,
         methods: method_options(&form.scan_method),
         form,

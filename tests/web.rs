@@ -914,3 +914,114 @@ async fn deleting_a_source_removes_the_projects_only_it_used() {
     // Projects that other sources use stay.
     assert!(after.contains(&"tokio-rs-tokio".to_string()));
 }
+
+// --- Gitea and Forgejo sources ---
+
+#[tokio::test]
+async fn gitea_is_offered_only_when_a_server_is_configured() {
+    let h = harness(true).await;
+    let csrf = dev_csrf(&h).await;
+    let res = h
+        .app
+        .clone()
+        .oneshot(Request::get("/sources").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let html = body(res).await;
+    assert!(html.contains("<option value=\"gitlab\""));
+    assert!(!html.contains("<option value=\"gitea\""), "{html}");
+
+    let res = h
+        .app
+        .oneshot(
+            Request::post("/sources")
+                .header(header::ORIGIN, ORIGIN)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(encode(&[
+                    ("_csrf", &csrf),
+                    ("provider", "gitea"),
+                    ("repo", "me/flux"),
+                    ("weight", "1"),
+                    ("scan_method", "images"),
+                ])))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body(res).await.contains("--gitea-url"));
+}
+
+#[tokio::test]
+async fn gitea_sources_use_the_configured_host() {
+    let h = harness_args(true, &["--gitea-url", "https://git.example.com:3000"]).await;
+    let csrf = dev_csrf(&h).await;
+    let add = |repo: &str| {
+        Request::post("/sources")
+            .header(header::ORIGIN, ORIGIN)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(encode(&[
+                ("_csrf", csrf.as_str()),
+                ("provider", "gitea"),
+                ("repo", repo),
+                ("weight", "1"),
+                ("scan_method", "images"),
+            ])))
+            .unwrap()
+    };
+
+    let res = h
+        .app
+        .clone()
+        .oneshot(Request::get("/sources").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert!(body(res).await.contains("<option value=\"gitea\""));
+
+    // Another host, or the same host on another port, is refused.
+    for bad in [
+        "https://evil.example/me/flux",
+        "https://git.example.com/me/flux",
+    ] {
+        let res = h.app.clone().oneshot(add(bad)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
+        assert!(
+            body(res).await.contains("must be on git.example.com:3000"),
+            "{bad}"
+        );
+    }
+
+    let res = h
+        .app
+        .clone()
+        .oneshot(add("https://git.example.com:3000/me/flux.git"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let source = h
+        .store
+        .list_sources()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|s| s.provider == Provider::Gitea)
+        .unwrap();
+    assert_eq!(source.repo, "me/flux");
+
+    let res = h
+        .app
+        .oneshot(
+            Request::get(format!("/sources/{}", source.id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let html = body(res).await;
+    assert!(
+        html.contains("https://git.example.com:3000/me/flux"),
+        "{html}"
+    );
+    // The scan section names the missing fetcher: the harness reads no server.
+    assert!(html.contains("no Gitea or Forgejo server is configured"));
+}

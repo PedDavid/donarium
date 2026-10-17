@@ -45,6 +45,22 @@ gitlab:
     existingSecret: ""
     key: token
 
+# A self-hosted Gitea or Forgejo that sources can live on. Without a url, Gitea
+# sources cannot be added. This is the only place the host is set: a source can
+# never name another one, so the token cannot be sent elsewhere.
+gitea:
+  url: ""              # e.g. https://git.example.com
+  tokenSecret:
+    existingSecret: ""   # a read:repository token, for private repositories
+    key: token
+
+# GitHub sources. A token is only needed for private repositories, and gives a
+# higher rate limit (anonymous requests are limited to 60 an hour).
+github:
+  tokenSecret:
+    existingSecret: ""
+    key: token
+
 # How often all sources are scanned. "0s" turns scheduled scans off (they can
 # still be started from the UI).
 scanInterval: 24h

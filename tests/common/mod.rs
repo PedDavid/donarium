@@ -14,7 +14,8 @@ use http_body_util::BodyExt;
 use donarium::config::Config;
 use donarium::demo;
 use donarium::metrics::Metrics;
-use donarium::scan::fetch::GitlabFetcher;
+use donarium::model::Provider;
+use donarium::scan::fetch::ArchiveFetcher;
 use donarium::scan::registry::RegistryClient;
 use donarium::scan::run::Scanner;
 use donarium::store::Store;
@@ -37,17 +38,23 @@ pub struct Harness {
 /// The app with the demo projects. With `dev_auth` every visitor is logged in
 /// as an admin; without it, OIDC is configured and visitors must log in.
 pub async fn harness(dev_auth: bool) -> Harness {
-    harness_with(dev_auth, None).await
+    harness_with(dev_auth, None, &[]).await
+}
+
+/// [`harness`] with extra command-line flags, e.g. `--gitea-url`.
+pub async fn harness_args(dev_auth: bool, extra: &[&str]) -> Harness {
+    harness_with(dev_auth, None, extra).await
 }
 
 /// Like [`harness`] with dev auth, but scans read GitLab from `gitlab` and
 /// image labels from `registry` (base URLs of mock servers).
 pub async fn harness_scanning(gitlab: &str, registry: &str) -> Harness {
-    harness_with(true, Some((gitlab.to_string(), registry.to_string()))).await
+    harness_with(true, Some((gitlab.to_string(), registry.to_string())), &[]).await
 }
 
-async fn harness_with(dev_auth: bool, mocks: Option<(String, String)>) -> Harness {
+async fn harness_with(dev_auth: bool, mocks: Option<(String, String)>, extra: &[&str]) -> Harness {
     let mut args = vec!["donarium"];
+    args.extend_from_slice(extra);
     if dev_auth {
         args.push("--insecure-dev-auth");
     } else {
@@ -70,10 +77,13 @@ async fn harness_with(dev_auth: bool, mocks: Option<(String, String)>) -> Harnes
     let scanner = Arc::new(match mocks {
         Some((gitlab, registry)) => Scanner::new(
             store.clone(),
-            Some(GitlabFetcher::new(gitlab.parse().unwrap(), None).unwrap()),
+            vec![(
+                Provider::Gitlab,
+                ArchiveFetcher::gitlab(gitlab.parse().unwrap(), None).unwrap(),
+            )],
             RegistryClient::for_tests(&registry),
         ),
-        None => Scanner::new(store.clone(), None, RegistryClient::new(vec![]).unwrap()),
+        None => Scanner::new(store.clone(), vec![], RegistryClient::new(vec![]).unwrap()),
     });
     let state =
         AppState::new(cfg, store.clone(), scanner.clone(), auth, key.clone()).with_fixed_now(now);

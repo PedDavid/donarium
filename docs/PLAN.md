@@ -142,12 +142,17 @@ For each `Source`:
 
 ### 4.2 Image scans
 
-1. **Fetch the repository as one archive** (GitLab `archive.tar.gz` today;
-   GitHub and Gitea/Forgejo are next) and read the YAML files from it in
+1. **Fetch the repository as one archive** and read the YAML files from it in
    memory. Nothing is written to disk and nothing is extracted, so archive paths
    cannot escape anywhere. Download size, expanded size, file size and file
-   count are capped, and redirects are not followed, so the token only ever goes
-   to its own host.
+   count are capped.
+   - GitLab: `archive.tar.gz` of the default branch.
+   - Gitea / Forgejo: the default branch from the repository API, then its
+     archive.
+   - GitHub: the `tarball` endpoint, which answers with a redirect to
+     `codeload.github.com`. That one hop is followed, only to that host over
+     https, and without the token.
+   Redirects are otherwise refused, so a token only ever goes to its own host.
 2. **Extract image references** (`src/scan/`):
    - Docker Compose files, recognised by their content (`services:` and no
      `apiVersion`), not by file name. `${VAR:-default}` uses the default; a
@@ -198,13 +203,15 @@ of one source never overlap. A failed scan keeps what the previous one found and
 marks the source as failed; the metrics `donarium_source_last_scan_ok` and
 `donarium_source_last_scan_timestamp_seconds` let Prometheus alert on that.
 
-**Forges and credentials.** GitHub and GitLab have fixed hosts. A self-hosted
-**Gitea or Forgejo** has no fixed host, so its base URL comes from the server
-configuration (`--gitea-url`, one per instance), never from a form. The source's
-provider is `gitea` (it covers Forgejo, whose API is compatible), and moving
-the repository from Gitea to Forgejo only means changing that URL. Each forge has
-its own read-only token, mounted from a Secret and sent only to its own host.
-Public repositories (the GitLab media server) need no token.
+**Forges and credentials.** The host of every forge comes from the server
+configuration, never from a form: GitHub is `github.com`, GitLab is
+`--gitlab-url` (default `gitlab.com`), and a self-hosted **Gitea or Forgejo** is
+`--gitea-url` (one instance; Gitea sources cannot be added without it). The
+source's provider is `gitea` (it covers Forgejo, whose API is compatible), and
+moving a repository from Gitea to Forgejo only means changing that URL. Pasted
+repository URLs must be on the configured host. Each forge has its own
+read-only token, mounted from a Secret and sent only to its own host. Public
+repositories (the GitLab media server) need no token.
 
 Known limits to state in the README: the dependency graph only sees what's
 committed, so unpinned or vendored dependencies are missed. Monorepo packages
@@ -375,8 +382,11 @@ without receipts, and an optional "no donation in N days" reminder.
      page for images, skipped references and mappings. Tested against mocked
      GitLab and registries, plus `tests/live.rs` (`--ignored`) against the real
      ones.
-   - 3b-2: the same for Gitea/Forgejo (`gitea` provider, host from
-     `--gitea-url`, token) and GitHub.
+   - 3b-2 (done): Gitea/Forgejo (`gitea` provider, host from `--gitea-url`,
+     token) and GitHub, with the forge hosts moved into configuration. Checked
+     live against GitHub (through a repository this environment may reach) as
+     well as with mocks; there is no Gitea or Forgejo to try it on here, so that
+     path is tested against mocks of its API only.
    - 3c: dependency scans: GitHub dependency-graph/SBOM, deps.dev resolution,
      aggregation.
    `wiremock` tests with recorded fixtures.

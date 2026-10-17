@@ -55,6 +55,29 @@ pub struct Config {
     #[arg(long, env = "DONARIUM_GITLAB_TOKEN_FILE")]
     pub gitlab_token_file: Option<PathBuf>,
 
+    /// Base URL of a Gitea or Forgejo server that Gitea sources live on, e.g.
+    /// https://git.example.com. Without it, Gitea sources cannot be added.
+    #[arg(long, env = "DONARIUM_GITEA_URL")]
+    pub gitea_url: Option<Url>,
+
+    /// File with a Gitea or Forgejo access token (read:repository) for private
+    /// repositories. Sent only to --gitea-url.
+    #[arg(long, env = "DONARIUM_GITEA_TOKEN_FILE")]
+    pub gitea_token_file: Option<PathBuf>,
+
+    /// API URL of GitHub.
+    #[arg(
+        long,
+        env = "DONARIUM_GITHUB_API_URL",
+        default_value = "https://api.github.com"
+    )]
+    pub github_api_url: Url,
+
+    /// File with a GitHub token (read-only access to contents) for private
+    /// repositories, and a higher rate limit. Sent only to --github-api-url.
+    #[arg(long, env = "DONARIUM_GITHUB_TOKEN_FILE")]
+    pub github_token_file: Option<PathBuf>,
+
     /// How often all sources are scanned. 0s turns scheduled scans off; scans
     /// can still be started from the UI.
     #[arg(long, env = "DONARIUM_SCAN_INTERVAL", default_value = "24h", value_parser = parse_duration)]
@@ -146,6 +169,17 @@ impl Config {
 
     /// Checks between flags that clap cannot express.
     pub fn check(&self) -> Result<(), String> {
+        for (flag, url) in [
+            ("--gitlab-url", Some(&self.gitlab_url)),
+            ("--gitea-url", self.gitea_url.as_ref()),
+            ("--github-api-url", Some(&self.github_api_url)),
+        ] {
+            if let Some(url) = url
+                && (!matches!(url.scheme(), "http" | "https") || url.host_str().is_none())
+            {
+                return Err(format!("{flag} must be an http(s) URL (got {url})"));
+            }
+        }
         if !self.database_url.starts_with("sqlite:") {
             return Err(format!(
                 "--database-url must be a sqlite: URL (got {:?}); other databases are not supported yet",
@@ -158,6 +192,14 @@ impl Config {
     /// `scheme://host[:port]` of the public URL, as sent in `Origin` headers.
     pub fn public_origin(&self) -> String {
         self.public_url.origin().ascii_serialization()
+    }
+
+    /// Where sources live, for validating repository URLs and linking to them.
+    pub fn forge_hosts(&self) -> crate::model::ForgeHosts {
+        crate::model::ForgeHosts {
+            gitlab: self.gitlab_url.clone(),
+            gitea: self.gitea_url.clone(),
+        }
     }
 
     /// Absolute URL for a path under the public URL.
@@ -184,6 +226,48 @@ mod tests {
             cfg.url_for("/projects/a"),
             "http://localhost:8080/projects/a"
         );
+    }
+
+    #[test]
+    fn forge_urls_must_be_http() {
+        for (flag, value) in [
+            ("--gitlab-url", "ftp://gitlab.example.com"),
+            ("--gitea-url", "file:///etc"),
+            ("--github-api-url", "git://github.com"),
+        ] {
+            let cfg = Config::try_parse_from(["donarium", flag, value]).unwrap();
+            assert!(cfg.check().unwrap_err().contains(flag), "{flag}");
+        }
+        let cfg =
+            Config::try_parse_from(["donarium", "--gitea-url", "https://git.example.com:3000"])
+                .unwrap();
+        assert!(cfg.check().is_ok());
+        let hosts = cfg.forge_hosts();
+        assert_eq!(
+            hosts.host(crate::model::Provider::Gitea).as_deref(),
+            Some("git.example.com:3000")
+        );
+        assert_eq!(
+            hosts.host(crate::model::Provider::Github).as_deref(),
+            Some("github.com")
+        );
+        assert_eq!(
+            hosts
+                .repo_url(crate::model::Provider::Gitea, "me/flux")
+                .as_deref(),
+            Some("https://git.example.com:3000/me/flux")
+        );
+        assert_eq!(hosts.available().len(), 3);
+        // Without a Gitea URL the provider is not available.
+        let none = Config::try_parse_from(["donarium"]).unwrap().forge_hosts();
+        assert_eq!(
+            none.available(),
+            [
+                crate::model::Provider::Github,
+                crate::model::Provider::Gitlab
+            ]
+        );
+        assert_eq!(none.repo_url(crate::model::Provider::Gitea, "a/b"), None);
     }
 
     #[test]

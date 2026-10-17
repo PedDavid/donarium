@@ -47,6 +47,18 @@ spec:
             - name: DONARIUM_GITLAB_TOKEN_FILE
               value: /etc/donarium/gitlab/{{ .Values.gitlab.tokenSecret.key }}
             {{- end }}
+            {{- if .Values.gitea.url }}
+            - name: DONARIUM_GITEA_URL
+              value: {{ .Values.gitea.url | quote }}
+            {{- if .Values.gitea.tokenSecret.existingSecret }}
+            - name: DONARIUM_GITEA_TOKEN_FILE
+              value: /etc/donarium/gitea/{{ .Values.gitea.tokenSecret.key }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.github.tokenSecret.existingSecret }}
+            - name: DONARIUM_GITHUB_TOKEN_FILE
+              value: /etc/donarium/github/{{ .Values.github.tokenSecret.key }}
+            {{- end }}
             - name: DONARIUM_SCAN_INTERVAL
               value: {{ .Values.scanInterval | quote }}
             {{- with .Values.registryAllow }}
@@ -112,6 +124,16 @@ spec:
               mountPath: /etc/donarium/gitlab
               readOnly: true
             {{- end }}
+            {{- if and .Values.gitea.url .Values.gitea.tokenSecret.existingSecret }}
+            - name: gitea-token
+              mountPath: /etc/donarium/gitea
+              readOnly: true
+            {{- end }}
+            {{- if .Values.github.tokenSecret.existingSecret }}
+            - name: github-token
+              mountPath: /etc/donarium/github
+              readOnly: true
+            {{- end }}
             - name: cookie-key
               mountPath: /etc/donarium/cookie
               readOnly: true
@@ -132,6 +154,16 @@ spec:
         - name: gitlab-token
           secret:
             secretName: {{ .Values.gitlab.tokenSecret.existingSecret }}
+        {{- end }}
+        {{- if and .Values.gitea.url .Values.gitea.tokenSecret.existingSecret }}
+        - name: gitea-token
+          secret:
+            secretName: {{ .Values.gitea.tokenSecret.existingSecret }}
+        {{- end }}
+        {{- if .Values.github.tokenSecret.existingSecret }}
+        - name: github-token
+          secret:
+            secretName: {{ .Values.github.tokenSecret.existingSecret }}
         {{- end }}
         - name: cookie-key
           secret:

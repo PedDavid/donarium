@@ -2,7 +2,7 @@
 
 use jiff::{SignedDuration, Timestamp};
 
-use crate::model::{Project, Source};
+use crate::model::{ForgeHosts, Project, Source};
 
 pub fn fmt_date(t: Timestamp) -> String {
     t.strftime("%Y-%m-%d").to_string()
@@ -66,7 +66,8 @@ pub struct SourceRow {
     pub id: i64,
     pub provider: &'static str,
     pub repo: String,
-    /// Built from the provider's fixed host and a validated path.
+    /// Built from the configured host and a validated path; empty when the
+    /// provider is not configured.
     pub url: String,
     pub weight: String,
     pub scan_method: &'static str,
@@ -83,12 +84,12 @@ pub struct SourceRow {
 }
 
 impl SourceRow {
-    pub fn new(s: &Source, now: Timestamp) -> SourceRow {
+    pub fn new(s: &Source, now: Timestamp, hosts: &ForgeHosts) -> SourceRow {
         SourceRow {
             id: s.id,
             provider: s.provider.as_str(),
             repo: s.repo.clone(),
-            url: format!("https://{}/{}", s.provider.host(), s.repo),
+            url: hosts.repo_url(s.provider, &s.repo).unwrap_or_default(),
             weight: fmt_weight(s.weight),
             scan_method: s.scan_method.as_str(),
             enabled: s.enabled,

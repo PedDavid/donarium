@@ -14,32 +14,35 @@ fn invalid<T>(msg: impl Into<String>) -> Result<T, ValidationError> {
 }
 
 /// Accepts `owner/name` (GitLab: also `group/subgroup/name`), or a full URL on
-/// the provider's own host, and returns the normalised path.
-pub fn parse_repo(provider: Provider, input: &str) -> Result<String, ValidationError> {
+/// the provider's own `host` (`host` or `host:port`), and returns the
+/// normalised path.
+pub fn parse_repo(provider: Provider, host: &str, input: &str) -> Result<String, ValidationError> {
     let mut path = input.trim();
     for scheme in ["https://", "http://"] {
         if let Some(rest) = path.strip_prefix(scheme) {
-            let prefix = format!("{}/", provider.host());
-            let Some(rest) = rest.strip_prefix(prefix.as_str()) else {
+            let prefix = format!("{host}/");
+            let matches = rest
+                .get(..prefix.len())
+                .is_some_and(|start| start.eq_ignore_ascii_case(&prefix));
+            if !matches {
                 return invalid(format!(
-                    "{} repositories must be on {}",
-                    provider.as_str(),
-                    provider.host()
+                    "{} repositories must be on {host}",
+                    provider.as_str()
                 ));
-            };
-            path = rest;
+            }
+            path = &rest[prefix.len()..];
         }
     }
     let path = path.trim_end_matches('/');
     let path = path.strip_suffix(".git").unwrap_or(path);
     let segments: Vec<&str> = path.split('/').collect();
     let ok = match provider {
-        Provider::Github => segments.len() == 2,
+        Provider::Github | Provider::Gitea => segments.len() == 2,
         Provider::Gitlab => segments.len() >= 2,
     };
     if !ok {
         return invalid(match provider {
-            Provider::Github => "enter the repository as owner/name",
+            Provider::Github | Provider::Gitea => "enter the repository as owner/name",
             Provider::Gitlab => "enter the project as group/name (subgroups are allowed)",
         });
     }
@@ -83,25 +86,32 @@ pub fn parse_weight(input: &str) -> Result<f64, ValidationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use Provider::{Github, Gitlab};
+    use Provider::{Gitea, Github, Gitlab};
+
+    const GITHUB: &str = "github.com";
+    const GITLAB: &str = "gitlab.com";
+    const GITEA: &str = "git.example.com:3000";
 
     #[test]
     fn github_repos() {
         assert_eq!(
-            parse_repo(Github, " PedDavid/infra ").unwrap(),
+            parse_repo(Github, GITHUB, " PedDavid/infra ").unwrap(),
             "PedDavid/infra"
         );
         assert_eq!(
-            parse_repo(Github, "https://github.com/tokio-rs/tokio.git/").unwrap(),
+            parse_repo(Github, GITHUB, "https://github.com/tokio-rs/tokio.git/").unwrap(),
             "tokio-rs/tokio"
         );
-        assert_eq!(parse_repo(Github, "a/b.c_d-e").unwrap(), "a/b.c_d-e");
+        assert_eq!(
+            parse_repo(Github, GITHUB, "a/b.c_d-e").unwrap(),
+            "a/b.c_d-e"
+        );
         for bad in [
             "", "tokio", "a/b/c", "/b", "a/", "-a/b", "a-/b", "a b/c", "a/b c", "a/..", "a/.",
             "a/b?x=1", "a_b/c",
         ] {
             assert!(
-                parse_repo(Github, bad).is_err(),
+                parse_repo(Github, GITHUB, bad).is_err(),
                 "{bad:?} should be rejected"
             );
         }
@@ -109,11 +119,11 @@ mod tests {
 
     #[test]
     fn urls_must_be_on_the_providers_host() {
-        assert!(parse_repo(Github, "https://evil.example/a/b").is_err());
-        assert!(parse_repo(Github, "https://gitlab.com/a/b").is_err());
-        assert!(parse_repo(Github, "https://github.com.evil.example/a/b").is_err());
+        assert!(parse_repo(Github, GITHUB, "https://evil.example/a/b").is_err());
+        assert!(parse_repo(Github, GITHUB, "https://gitlab.com/a/b").is_err());
+        assert!(parse_repo(Github, GITHUB, "https://github.com.evil.example/a/b").is_err());
         assert_eq!(
-            parse_repo(Gitlab, "https://gitlab.com/g/sub/p").unwrap(),
+            parse_repo(Gitlab, GITLAB, "https://gitlab.com/g/sub/p").unwrap(),
             "g/sub/p"
         );
     }
@@ -121,11 +131,42 @@ mod tests {
     #[test]
     fn gitlab_allows_subgroups() {
         assert_eq!(
-            parse_repo(Gitlab, "group/sub/proj").unwrap(),
+            parse_repo(Gitlab, GITLAB, "group/sub/proj").unwrap(),
             "group/sub/proj"
         );
-        assert!(parse_repo(Gitlab, "proj").is_err());
-        assert!(parse_repo(Gitlab, "a//b").is_err());
+        assert!(parse_repo(Gitlab, GITLAB, "proj").is_err());
+        assert!(parse_repo(Gitlab, GITLAB, "a//b").is_err());
+    }
+
+    #[test]
+    fn gitea_repos_use_the_configured_host() {
+        assert_eq!(parse_repo(Gitea, GITEA, "me/flux").unwrap(), "me/flux");
+        assert_eq!(
+            parse_repo(Gitea, GITEA, "https://git.example.com:3000/Me/flux.git").unwrap(),
+            "Me/flux"
+        );
+        // An uppercase scheme is not recognised as a URL, so the whole input
+        // is read as a path, which is not a valid repository.
+        assert!(parse_repo(Gitea, GITEA, "HTTP://GIT.EXAMPLE.COM:3000/me/flux").is_err());
+        // A different host, a different port, or a lookalike are all refused.
+        for bad in [
+            "https://git.example.com/me/flux",
+            "https://git.example.com:3001/me/flux",
+            "https://git.example.com:3000.evil.example/me/flux",
+            "https://github.com/me/flux",
+            "me/flux/extra",
+            "flux",
+        ] {
+            assert!(
+                parse_repo(Gitea, GITEA, bad).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
+        // The host check ignores case.
+        assert_eq!(
+            parse_repo(Gitea, GITEA, "https://GIT.example.com:3000/me/flux").unwrap(),
+            "me/flux"
+        );
     }
 
     #[test]

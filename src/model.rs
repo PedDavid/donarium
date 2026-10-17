@@ -43,33 +43,73 @@ pub struct Project {
     pub funding: Vec<String>,
 }
 
-/// Where a source repository is hosted. The hosts are fixed in code, so user
-/// input can never point a scan (and its credentials) somewhere else.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Where a source repository is hosted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Provider {
     Github,
     Gitlab,
+    /// Gitea, and Forgejo (whose API is compatible).
+    Gitea,
 }
 
 impl Provider {
-    pub const ALL: [Provider; 2] = [Provider::Github, Provider::Gitlab];
+    pub const ALL: [Provider; 3] = [Provider::Github, Provider::Gitlab, Provider::Gitea];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Provider::Github => "github",
             Provider::Gitlab => "gitlab",
-        }
-    }
-
-    pub fn host(self) -> &'static str {
-        match self {
-            Provider::Github => "github.com",
-            Provider::Gitlab => "gitlab.com",
+            Provider::Gitea => "gitea",
         }
     }
 
     pub fn parse(s: &str) -> Option<Provider> {
         Provider::ALL.into_iter().find(|p| p.as_str() == s)
+    }
+}
+
+/// The hosts that sources live on. They come from the server's configuration,
+/// never from what is typed into a form, so a source cannot make the server
+/// send a token (or any request) somewhere else.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForgeHosts {
+    pub gitlab: url::Url,
+    /// `None` when no Gitea or Forgejo is configured.
+    pub gitea: Option<url::Url>,
+}
+
+impl ForgeHosts {
+    /// The web address of the provider: `https://github.com`, or the configured one.
+    pub fn base(&self, provider: Provider) -> Option<url::Url> {
+        match provider {
+            Provider::Github => url::Url::parse("https://github.com").ok(),
+            Provider::Gitlab => Some(self.gitlab.clone()),
+            Provider::Gitea => self.gitea.clone(),
+        }
+    }
+
+    /// `host` or `host:port`, as it appears in repository URLs.
+    pub fn host(&self, provider: Provider) -> Option<String> {
+        let base = self.base(provider)?;
+        let host = base.host_str()?;
+        Some(match base.port() {
+            Some(port) => format!("{host}:{port}"),
+            None => host.to_string(),
+        })
+    }
+
+    /// The page of a repository on its host.
+    pub fn repo_url(&self, provider: Provider, repo: &str) -> Option<String> {
+        let base = self.base(provider)?;
+        Some(format!("{}/{repo}", base.as_str().trim_end_matches('/')))
+    }
+
+    /// The providers that can be used on this server.
+    pub fn available(&self) -> Vec<Provider> {
+        Provider::ALL
+            .into_iter()
+            .filter(|p| self.base(*p).is_some())
+            .collect()
     }
 }
 

@@ -9,7 +9,8 @@ use tracing_subscriber::EnvFilter;
 use donarium::config::Config;
 use donarium::demo;
 use donarium::metrics::Metrics;
-use donarium::scan::fetch::GitlabFetcher;
+use donarium::model::Provider;
+use donarium::scan::fetch::ArchiveFetcher;
 use donarium::scan::registry::RegistryClient;
 use donarium::scan::run::{Scanner, spawn_scheduler};
 use donarium::store::Store;
@@ -59,29 +60,46 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Demo mode never reaches out: it has no fetcher, so scans report that GitLab
-/// is not configured.
+/// The token in `path`, if one is configured.
+fn read_token(path: &Option<std::path::PathBuf>) -> anyhow::Result<Option<String>> {
+    path.as_ref()
+        .map(|path| {
+            std::fs::read_to_string(path)
+                .map(|t| t.trim().to_string())
+                .with_context(|| format!("reading {}", path.display()))
+        })
+        .transpose()
+}
+
+/// Demo mode never reaches out: it has no fetchers, so scans report that the
+/// forge is not configured.
 fn build_scanner(cfg: &Config, store: Arc<Store>) -> anyhow::Result<Scanner> {
-    let gitlab = if cfg.demo {
-        None
-    } else {
-        let token = match &cfg.gitlab_token_file {
-            Some(path) => Some(
-                std::fs::read_to_string(path)
-                    .with_context(|| format!("reading {}", path.display()))?
-                    .trim()
-                    .to_string(),
-            ),
-            None => None,
-        };
-        Some(
-            GitlabFetcher::new(cfg.gitlab_url.clone(), token)
+    let mut fetchers = Vec::new();
+    if !cfg.demo {
+        fetchers.push((
+            Provider::Gitlab,
+            ArchiveFetcher::gitlab(cfg.gitlab_url.clone(), read_token(&cfg.gitlab_token_file)?)
                 .context("building the GitLab client")?,
-        )
-    };
+        ));
+        if let Some(url) = &cfg.gitea_url {
+            fetchers.push((
+                Provider::Gitea,
+                ArchiveFetcher::gitea(url.clone(), read_token(&cfg.gitea_token_file)?)
+                    .context("building the Gitea client")?,
+            ));
+        }
+        fetchers.push((
+            Provider::Github,
+            ArchiveFetcher::github(
+                cfg.github_api_url.clone(),
+                read_token(&cfg.github_token_file)?,
+            )
+            .context("building the GitHub client")?,
+        ));
+    }
     let registry =
         RegistryClient::new(cfg.registry_allow.clone()).context("building the registry client")?;
-    Ok(Scanner::new(store, gitlab, registry))
+    Ok(Scanner::new(store, fetchers, registry))
 }
 
 fn init_tracing(json: bool) {

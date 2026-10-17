@@ -119,7 +119,7 @@ async fn app(idp: &Idp, key: &Key) -> Router {
     let auth = AuthMode::from_config(&cfg.auth, &cfg.public_url, false).unwrap();
     let scanner = Arc::new(Scanner::new(
         store.clone(),
-        None,
+        vec![],
         RegistryClient::new(vec![]).unwrap(),
     ));
     router(AppState::new(cfg, store, scanner, auth, key.clone()))

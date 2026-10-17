@@ -1,14 +1,14 @@
 //! Runs scans: fetch a source's repository, find its images, ask registries
 //! where they come from, and rewrite the usage that results.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use jiff::{SignedDuration, Timestamp};
 use tracing::{info, warn};
 
-use super::fetch::GitlabFetcher;
+use super::fetch::ArchiveFetcher;
 use super::image::ImageRef;
 use super::manifests::scan_files;
 use super::registry::{LookupError, RegistryClient};
@@ -45,7 +45,7 @@ pub enum ScanError {
 
 pub struct Scanner {
     store: Arc<Store>,
-    gitlab: Option<GitlabFetcher>,
+    fetchers: HashMap<Provider, ArchiveFetcher>,
     registry: RegistryClient,
     running: Mutex<HashSet<i64>>,
 }
@@ -65,14 +65,15 @@ impl Drop for Running<'_> {
 }
 
 impl Scanner {
+    /// `fetchers` has one entry per provider this server can read.
     pub fn new(
         store: Arc<Store>,
-        gitlab: Option<GitlabFetcher>,
+        fetchers: Vec<(Provider, ArchiveFetcher)>,
         registry: RegistryClient,
     ) -> Scanner {
         Scanner {
             store,
-            gitlab,
+            fetchers: fetchers.into_iter().collect(),
             registry,
             running: Mutex::new(HashSet::new()),
         }
@@ -90,14 +91,15 @@ impl Scanner {
                 source.scan_method.as_str()
             ));
         }
-        match source.provider {
-            Provider::Gitlab if self.gitlab.is_some() => Ok(()),
-            Provider::Gitlab => Err("GitLab is not configured".into()),
-            other => Err(format!(
-                "image scans of {} repositories are not available yet",
-                other.as_str()
-            )),
+        if self.fetchers.contains_key(&source.provider) {
+            return Ok(());
         }
+        Err(match source.provider {
+            Provider::Github => "GitHub is not configured",
+            Provider::Gitlab => "GitLab is not configured",
+            Provider::Gitea => "no Gitea or Forgejo server is configured (--gitea-url)",
+        }
+        .into())
     }
 
     /// Scans one source now. The outcome, good or bad, is saved on the source.
@@ -146,7 +148,10 @@ impl Scanner {
             return Err(ScanError::Failed("the source is disabled".into()));
         }
         self.can_scan(source).map_err(ScanError::Failed)?;
-        let fetcher = self.gitlab.as_ref().expect("can_scan checked the fetcher");
+        let fetcher = self
+            .fetchers
+            .get(&source.provider)
+            .expect("can_scan checked the fetcher");
         let fetched = fetcher
             .fetch(&source.repo)
             .await
@@ -360,7 +365,10 @@ services:
             .id;
         let scanner = Scanner::new(
             store.clone(),
-            Some(GitlabFetcher::new(gitlab.uri().parse().unwrap(), None).unwrap()),
+            vec![(
+                Provider::Gitlab,
+                ArchiveFetcher::gitlab(gitlab.uri().parse().unwrap(), None).unwrap(),
+            )],
             RegistryClient::for_tests(&registry.uri()),
         );
         Setup {
@@ -665,6 +673,127 @@ services:
         );
     }
 
+    /// A scanner that can read all three forges, each from its own mock.
+    async fn all_forges() -> (
+        Arc<Store>,
+        Scanner,
+        MockServer,
+        MockServer,
+        MockServer,
+        MockServer,
+    ) {
+        let store = Arc::new(Store::memory().await.unwrap());
+        let (gitlab, gitea, github, registry) = (
+            MockServer::start().await,
+            MockServer::start().await,
+            MockServer::start().await,
+            MockServer::start().await,
+        );
+        let scanner = Scanner::new(
+            store.clone(),
+            vec![
+                (
+                    Provider::Gitlab,
+                    ArchiveFetcher::gitlab(gitlab.uri().parse().unwrap(), None).unwrap(),
+                ),
+                (
+                    Provider::Gitea,
+                    ArchiveFetcher::gitea(gitea.uri().parse().unwrap(), Some("t".into())).unwrap(),
+                ),
+                (
+                    Provider::Github,
+                    ArchiveFetcher::github(github.uri().parse().unwrap(), None).unwrap(),
+                ),
+            ],
+            RegistryClient::for_tests(&registry.uri()),
+        );
+        (store, scanner, gitlab, gitea, github, registry)
+    }
+
+    async fn add_source(store: &Store, provider: Provider, repo: &str) -> i64 {
+        store
+            .create_source(
+                &NewSource {
+                    provider,
+                    repo: repo.into(),
+                    weight: 1.0,
+                    scan_method: ScanMethod::Images,
+                },
+                &Actor::new("u1", "alice"),
+                Timestamp::now(),
+            )
+            .await
+            .unwrap()
+            .id
+    }
+
+    #[tokio::test]
+    async fn gitea_and_github_sources_are_scanned_too() {
+        let (store, scanner, _gitlab, gitea, github, registry) = all_forges().await;
+        image_label(
+            &registry,
+            "linuxserver/sonarr",
+            "latest",
+            Some("https://github.com/linuxserver/docker-sonarr"),
+        )
+        .await;
+        image_label(
+            &registry,
+            "grafana/grafana",
+            "11",
+            Some("https://github.com/grafana/grafana"),
+        )
+        .await;
+
+        // Gitea: the default branch first, then its archive.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/me/flux"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"default_branch": "main"})),
+            )
+            .mount(&gitea)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/me/flux/archive/main.tar.gz"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(archive(&[(
+                "apps/sonarr/helmrelease.yaml",
+                b"apiVersion: helm.toolkit.fluxcd.io/v2\nkind: HelmRelease\nmetadata: {name: sonarr}\nspec:\n  values:\n    image:\n      repository: lscr.io/linuxserver/sonarr\n      tag: latest\n",
+            )])))
+            .mount(&gitea)
+            .await;
+        // GitHub answers directly here (the redirect is covered by the fetcher's tests).
+        Mock::given(method("GET"))
+            .and(path("/repos/me/infra/tarball"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(archive(&[(
+                "compose.yaml",
+                b"services:\n  g:\n    image: grafana/grafana:11\n",
+            )])))
+            .mount(&github)
+            .await;
+
+        let flux = add_source(&store, Provider::Gitea, "me/flux").await;
+        let infra = add_source(&store, Provider::Github, "me/infra").await;
+        scanner.scan_source(flux).await.unwrap();
+        scanner.scan_source(infra).await.unwrap();
+        assert_eq!(
+            names(&store).await,
+            ["grafana-grafana", "linuxserver-docker-sonarr"]
+        );
+        let flux = store.get_source(flux).await.unwrap().unwrap();
+        assert_eq!(
+            flux.last_scan_status.as_deref(),
+            Some("1 images, 1 projects")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_server_is_reported_per_provider() {
+        let s = setup().await; // only GitLab is configured
+        let gitea = add_source(&s.store, Provider::Gitea, "me/flux").await;
+        let err = s.scanner.scan_source(gitea).await.unwrap_err();
+        assert!(err.to_string().contains("--gitea-url"), "{err}");
+    }
+
     #[tokio::test]
     async fn unsupported_sources_say_why() {
         let s = setup().await;
@@ -683,7 +812,7 @@ services:
             .await
             .unwrap();
         let err = s.scanner.scan_source(github.id).await.unwrap_err();
-        assert!(err.to_string().contains("github"), "{err}");
+        assert!(err.to_string().contains("GitHub"), "{err}");
         let lockfiles = s
             .store
             .create_source(

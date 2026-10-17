@@ -52,6 +52,25 @@ env=$(render | yq 'select(.kind == "Deployment") | .spec.template.spec.container
 [[ -z $(yq '.[] | select(.name == "DONARIUM_GITLAB_TOKEN_FILE")' <<<"$env") ]] || fail "a token file is passed without a Secret"
 [[ $(yq '.[] | select(.name == "DONARIUM_GITLAB_URL") | .value' <<<"$env") == https://gitlab.com ]] || fail "the GitLab URL default is wrong"
 
+# Gitea/Forgejo and GitHub: the server URL and each token file are passed (and
+# the Secret mounted) only when configured, and a token Secret without a Gitea
+# URL is ignored rather than mounted for nothing.
+out=$(render --set gitea.url=https://git.example.com --set gitea.tokenSecret.existingSecret=gt --set github.tokenSecret.existingSecret=gh)
+env=$(yq 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env' <<<"$out")
+[[ $(yq '.[] | select(.name == "DONARIUM_GITEA_URL") | .value' <<<"$env") == https://git.example.com ]] || fail "the Gitea URL is not passed"
+[[ $(yq '.[] | select(.name == "DONARIUM_GITEA_TOKEN_FILE") | .value' <<<"$env") == /etc/donarium/gitea/token ]] || fail "the Gitea token file is not passed"
+[[ $(yq '.[] | select(.name == "DONARIUM_GITHUB_TOKEN_FILE") | .value' <<<"$env") == /etc/donarium/github/token ]] || fail "the GitHub token file is not passed"
+for name in gitea-token:gt github-token:gh; do
+  [[ $(yq "select(.kind == \"Deployment\") | .spec.template.spec.volumes[] | select(.name == \"${name%%:*}\") | .secret.secretName" <<<"$out") == "${name##*:}" ]] \
+    || fail "the ${name%%:*} Secret is not mounted"
+done
+out=$(render --set gitea.tokenSecret.existingSecret=gt)
+env=$(yq 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env' <<<"$out")
+[[ -z $(yq '.[] | select(.name == "DONARIUM_GITEA_URL" or .name == "DONARIUM_GITEA_TOKEN_FILE")' <<<"$env") ]] \
+  || fail "Gitea is configured without a URL"
+[[ -z $(yq 'select(.kind == "Deployment") | .spec.template.spec.volumes[] | select(.name == "gitea-token")' <<<"$out") ]] \
+  || fail "a Gitea token Secret is mounted without a URL"
+
 # The default image tag is the chart's appVersion, which the release
 # workflow publishes (see .github/workflows/release.yml).
 app=$(yq '.appVersion' "$chart/Chart.yaml")

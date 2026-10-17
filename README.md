@@ -9,8 +9,9 @@ It never moves money: you donate on the project's own page, then record it.
 
 > **Status:** early. The web shell, OIDC login, metrics, Helm chart and the
 > SQLite database are in place, and admins can manage **sources** (the
-> repositories to scan) in the UI. GitLab sources can be scanned for the
-> container images in their Docker Compose and Kubernetes (Flux) files.
+> repositories to scan) in the UI. Sources on GitLab, GitHub and Gitea/Forgejo
+> can be scanned for the container images in their Docker Compose and
+> Kubernetes (Flux) files.
 > Dependency scans, ranking, donations and receipts are next. See [docs/PLAN.md](docs/PLAN.md) for the full design and
 > milestones.
 
@@ -46,9 +47,16 @@ images it runs:
   then a guess from the image name. Images without a project are listed on the
   source's page, where an admin can map them. Packager images (linuxserver,
   Jellyfin) point to their packaging repository until remapped.
-- **GitLab only so far.** GitHub and Gitea/Forgejo sources are next.
-  `--gitlab-url` (default `https://gitlab.com`) and `--gitlab-token-file` (for
-  private repositories) configure it. The token is only sent to that host.
+- **Forges:** GitLab, GitHub and Gitea or Forgejo. Each repository is downloaded
+  as one archive. The host of every forge comes from the server's
+  configuration, never from a form, and its token is only sent to that host:
+  - GitLab: `--gitlab-url` (default `https://gitlab.com`), `--gitlab-token-file`.
+  - GitHub: `--github-token-file`. Public repositories work without one, within
+    GitHub's anonymous limit of 60 requests an hour.
+  - Gitea or Forgejo: `--gitea-url` (e.g. `https://git.example.com`) and
+    `--gitea-token-file`. Without `--gitea-url`, Gitea sources cannot be added.
+    Moving from Gitea to Forgejo only means changing that URL.
+  - Private repositories need a read-only token for their forge.
 - **Schedule:** `--scan-interval` (default `24h`, `0s` for never) and "Scan now"
   on the source's page.
 - **Registries:** only well-known public ones are contacted
