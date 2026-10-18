@@ -75,6 +75,12 @@ s3:
     accessKeyKey: access-key
     secretKeyKey: secret-key
 
+# Logins for container registries, to look up image labels without the
+# anonymous limits of Docker Hub. A kubernetes.io/dockerconfigjson Secret.
+registryCredentials:
+  existingSecret: ""
+  key: .dockerconfigjson
+
 # GitHub sources. A token is only needed for private repositories, and gives a
 # higher rate limit (anonymous requests are limited to 60 an hour).
 github:
