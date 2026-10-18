@@ -273,6 +273,67 @@ impl DonationKind {
     }
 }
 
+/// How often a recurring donation is made.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Every {
+    #[default]
+    Monthly,
+    Yearly,
+}
+
+impl Every {
+    pub const ALL: [Every; 2] = [Every::Monthly, Every::Yearly];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Every::Monthly => "monthly",
+            Every::Yearly => "yearly",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Every::Monthly => "every month",
+            Every::Yearly => "every year",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Every> {
+        Every::ALL.into_iter().find(|e| e.as_str() == s)
+    }
+}
+
+/// A recurring donation to set up (already validated).
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewRecurring {
+    pub project: String,
+    pub platform: String,
+    pub amount_minor: i64,
+    pub currency: String,
+    pub every: Every,
+    pub starts_on: jiff::civil::Date,
+    pub note: String,
+}
+
+/// A monthly or yearly donation that records itself when it is due.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Recurring {
+    pub id: i64,
+    pub project: String,
+    pub project_repo: String,
+    pub platform: String,
+    pub amount_minor: i64,
+    pub currency: String,
+    pub every: Every,
+    pub starts_on: jiff::civil::Date,
+    /// The last day it can fall on; `None` while it keeps running.
+    pub ends_on: Option<jiff::civil::Date>,
+    pub note: String,
+    pub created_by: Actor,
+    /// Donations it has recorded so far.
+    pub recorded: i64,
+}
+
 /// Where a conversion rate came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FxSource {

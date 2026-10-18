@@ -59,6 +59,13 @@ donation keeps what was paid, exactly, in the currency it was paid in.
     truth; it is not tax advice.
 - `--step-up-max-age` makes recording and voiding require a recent login.
 
+A subscription (GitHub Sponsors, Open Collective, …) is set up once as a
+*recurring donation* on the donations page: an amount, how often (monthly or
+yearly) and the first date. Each date it falls on records an ordinary donation,
+converted at that day's rate, when it comes due (checked hourly, and at once when
+it is set up). A plan that began long ago catches up 36 donations per run. Ending
+a plan stops new donations and keeps what was recorded; plans are never deleted.
+
 Every donation that counts can be downloaded as a CSV file
 (`/donations/export.csv`, or `?year=2026` for a tax year) with the amount as
 paid, the amount in the base currency, the rate used and where it came from.
