@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="flex flex-col gap-6">
+  <div>
+    <a href="/donations" class="text-sm text-muted-foreground hover:underline">← Donations</a>
+    <h1 class="text-2xl font-semibold tracking-tight">Find the receipt</h1>
+    <p class="text-muted-foreground text-sm">For {{ summary }}. Pick a document that is already in Paperless: only a link to it is kept.</p>
+  </div>
+
+  <form method="get" action="/donations/{{ id }}/receipt" class="flex gap-2 sm:max-w-md">
+    <input class="input grow" type="search" name="q" value="{{ query }}" placeholder="Search Paperless…" aria-label="Search Paperless">
+    <button type="submit" class="btn" data-variant="outline">Search</button>
+  </form>
+
+  {% if !error.is_empty() %}
+  <div class="alert" data-variant="destructive" role="alert"><h2>{{ error }}</h2></div>
+  {% else if hits.is_empty() %}
+  <p class="text-sm text-muted-foreground">{% if suggested %}Nothing in Paperless is dated within a week of the donation. Search for it above.{% else %}Nothing matches.{% endif %}</p>
+  {% else %}
+  <p class="text-sm text-muted-foreground">{% if suggested %}Documents dated within a week of the donation:{% else %}Search results:{% endif %}</p>
+  <div class="table-container rounded-lg border">
+    <table class="table">
+      <thead><tr><th>Document</th><th>Date</th><th><span class="sr-only">Link</span></th></tr></thead>
+      <tbody>
+        {% for h in hits %}
+        <tr>
+          <td>{{ h.title }} <span class="text-xs text-muted-foreground">#{{ h.id }}</span></td>
+          <td class="whitespace-nowrap">{{ h.date }}</td>
+          <td class="text-end">
+            <form method="post" action="/donations/{{ id }}/receipt">
+              <input type="hidden" name="_csrf" value="{{ layout.csrf }}">
+              <input type="hidden" name="document" value="{{ h.id }}">
+              <button type="submit" class="btn" data-variant="outline" data-size="sm">Link</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

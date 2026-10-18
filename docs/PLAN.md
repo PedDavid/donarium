@@ -343,6 +343,12 @@ pub trait ReceiptStore: Send + Sync {
     linked to Paperless's own UI, depending on `--paperless-open=proxy|link`.
     The default is `link`, so Donarium never serves documents that Paperless
     already protects.
+- **Built so far:** Paperless link-only. `--paperless-url` and
+  `--paperless-token-file` turn it on; a donation then offers *Find receipt*,
+  which lists documents dated within a week of it (or searches by text), checks
+  the chosen document exists, and stores its id and title in `receipt`. The
+  Paperless token is sent only to the configured server and redirects are not
+  followed. Documents open in Paperless's own UI (`link` mode).
 - **S3 (upload).** For receipts that exist nowhere else (a PDF from a donation
   page). Uploaded to `<bucket>/<year>/<donation-id>/<filename>` with SSE and a
   SHA-256, served through short-lived presigned URLs after an OIDC check.
@@ -367,8 +373,8 @@ pub trait ReceiptStore: Send + Sync {
 | `donarium_donations_without_conversion` | Donations still missing a base amount | yes |
 | `donarium_fx_requests_total{result}` | Rate lookups: ok, unsupported, rate_limited, error | yes |
 | `donarium_project_priority{project}` | Ranking value (top N only, to bound cardinality) | yes |
-| `donarium_donations_without_receipt` | Receipt hygiene | with receipts |
-| `donarium_receipt_store_healthy{store}` | | with receipts |
+| `donarium_donations_without_receipt` | Receipt hygiene | yes |
+| `donarium_receipt_store_healthy{store}` | | with S3 |
 
 Shipped `PrometheusRule`s: scans stale, receipt store unhealthy, donations
 without receipts, and an optional "no donation in N days" reminder.

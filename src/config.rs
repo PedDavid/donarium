@@ -65,6 +65,24 @@ pub struct Config {
     #[arg(long, env = "DONARIUM_GITEA_TOKEN_FILE")]
     pub gitea_token_file: Option<PathBuf>,
 
+    /// Base URL of a Paperless-ngx server to find receipts in, e.g.
+    /// https://paperless.example.com. Receipts are linked, never copied.
+    /// Needs --paperless-token-file.
+    #[arg(
+        long,
+        env = "DONARIUM_PAPERLESS_URL",
+        requires = "paperless_token_file"
+    )]
+    pub paperless_url: Option<Url>,
+
+    /// File with a Paperless-ngx API token. Sent only to --paperless-url.
+    #[arg(
+        long,
+        env = "DONARIUM_PAPERLESS_TOKEN_FILE",
+        requires = "paperless_url"
+    )]
+    pub paperless_token_file: Option<PathBuf>,
+
     /// API URL of GitHub.
     #[arg(
         long,
@@ -199,6 +217,7 @@ impl Config {
         for (flag, url) in [
             ("--gitlab-url", Some(&self.gitlab_url)),
             ("--gitea-url", self.gitea_url.as_ref()),
+            ("--paperless-url", self.paperless_url.as_ref()),
             ("--github-api-url", Some(&self.github_api_url)),
             ("--fx-url", Some(&self.fx_url)),
         ] {

@@ -5,6 +5,7 @@ pub mod auth;
 mod donations;
 mod pages;
 mod projects;
+mod receipts;
 mod sources;
 pub mod views;
 
@@ -27,6 +28,7 @@ use tower_http::trace::TraceLayer;
 use crate::config::Config;
 use crate::fx::Fx;
 use crate::metrics::Metrics;
+use crate::receipts::Paperless;
 use crate::scan::run::Scanner;
 use crate::store::{Store, StoreError};
 use auth::AuthMode;
@@ -41,6 +43,8 @@ pub struct Inner {
     pub store: Arc<Store>,
     pub scanner: Arc<Scanner>,
     pub fx: Arc<Fx>,
+    /// Where receipts are found, if Paperless is configured.
+    pub paperless: Option<Paperless>,
     pub auth: AuthMode,
     pub cookie_key: Key,
     pub asset_version: String,
@@ -63,12 +67,20 @@ impl AppState {
                 store,
                 scanner,
                 fx,
+                paperless: None,
                 auth,
                 cookie_key,
                 asset_version: asset_version(),
                 fixed_now: None,
             }),
         }
+    }
+
+    pub fn with_paperless(mut self, paperless: Paperless) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("Paperless is set before the state is shared")
+            .paperless = Some(paperless);
+        self
     }
 
     /// Renders every page as if it were `now`, so output is reproducible.
@@ -247,6 +259,11 @@ pub fn router(state: AppState) -> Router {
         .route("/donations", get(donations::index).post(donations::record))
         .route("/donations/{id}/void", post(donations::void))
         .route("/donations/{id}/rate", post(donations::set_rate))
+        .route(
+            "/donations/{id}/receipt",
+            get(receipts::search).post(receipts::link),
+        )
+        .route("/receipts/{id}/delete", post(receipts::unlink))
         .route("/projects", post(projects::create))
         .route(
             "/projects/{name}",

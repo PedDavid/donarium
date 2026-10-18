@@ -254,6 +254,17 @@ pub struct DonationRow {
     pub recorded_by: String,
     /// "bob, 2026-10-01", if it was voided.
     pub voided: String,
+    /// Linked receipts, filled in by [`super::receipts::attach`].
+    pub receipts: Vec<ReceiptLink>,
+    /// Receipts can be linked (Paperless is configured).
+    pub can_link: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ReceiptLink {
+    pub id: i64,
+    pub title: String,
+    pub url: String,
 }
 
 impl DonationRow {
@@ -290,6 +301,8 @@ impl DonationRow {
                 .as_ref()
                 .map(|(by, at)| format!("{by}, {}", fmt_date(*at)))
                 .unwrap_or_default(),
+            receipts: Vec::new(),
+            can_link: false,
         }
     }
 }

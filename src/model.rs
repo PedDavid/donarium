@@ -362,3 +362,14 @@ pub struct Totals {
     /// In the base currency, newest year first.
     pub by_year: Vec<(i32, i64)>,
 }
+
+/// A document in Paperless-ngx that a donation points to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Receipt {
+    pub id: i64,
+    pub donation_id: i64,
+    /// The document's id in Paperless.
+    pub reference: String,
+    pub title: String,
+    pub linked_by: String,
+}

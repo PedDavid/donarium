@@ -59,6 +59,15 @@ donation keeps what was paid, exactly, in the currency it was paid in.
     truth; it is not tax advice.
 - `--step-up-max-age` makes recording and voiding require a recent login.
 
+## Receipts
+
+With `--paperless-url` and `--paperless-token-file` (an API token), each
+donation gets a *Find receipt* button. It lists the Paperless documents dated
+within a week of the donation, or searches by text, and links the one you pick.
+Only the document's id and title are kept: nothing is copied, and Paperless
+still decides who can open the file. Unlinking never touches the document.
+`donarium_donations_without_receipt` counts the donations that have none.
+
 ## Scanning
 
 A source with the scan method `images` (or `auto`) is scanned for the container
