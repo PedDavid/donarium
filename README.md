@@ -125,8 +125,13 @@ images it runs:
 - **Schedule:** `--scan-interval` (default `24h`, `0s` for never) and "Scan now"
   on the source's page.
 - **Registries:** only well-known public ones are contacted
-  (`--registry-allow` adds more), anonymously. Docker Hub limits anonymous pulls,
-  so the first scan of many images may leave some for the next one.
+  (`--registry-allow` adds more), anonymously by default. Docker Hub limits
+  anonymous pulls, so the first scan of many images may leave some for the next
+  one. To lift that, give `--registry-credentials-file` a Docker `config.json`
+  (a `kubernetes.io/dockerconfigjson` Secret works; Helm
+  `registryCredentials.existingSecret`). A login is sent only to the token
+  endpoint of the registry it is for (for Docker Hub, `auth.docker.io`), never
+  to wherever a challenge points, and never logged.
 
 `cargo test --test live -- --ignored --nocapture` checks the registry and GitLab
 code against the real services.

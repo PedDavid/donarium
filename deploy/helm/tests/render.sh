@@ -98,6 +98,13 @@ for skip in 0 1 2; do
     || fail "S3 is half configured"
 done
 
+# Registry logins are passed and mounted only when a Secret is named.
+out=$(render --set registryCredentials.existingSecret=regcred)
+env=$(yq 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env' <<<"$out")
+[[ $(yq '.[] | select(.name == "DONARIUM_REGISTRY_CREDENTIALS_FILE") | .value' <<<"$env") == /etc/donarium/registry/.dockerconfigjson ]] || fail "the registry credentials file is not passed"
+[[ $(yq 'select(.kind == "Deployment") | .spec.template.spec.volumes[] | select(.name == "registry-credentials") | .secret.secretName' <<<"$out") == regcred ]] || fail "the registry Secret is not mounted"
+[[ -z $(render | yq 'select(.kind == "Deployment") | .spec.template.spec.volumes[] | select(.name == "registry-credentials")') ]] || fail "registry credentials mounted without a Secret"
+
 # The base currency reaches the container, EUR unless set.
 env=$(render | yq 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env')
 [[ $(yq '.[] | select(.name == "DONARIUM_BASE_CURRENCY") | .value' <<<"$env") == EUR ]] || fail "the base currency default is not EUR"

@@ -1,11 +1,14 @@
 //! Reads the source repository of a container image from its registry: the
 //! `org.opencontainers.image.source` label (or annotation) that most images
-//! carry. Anonymous access only, so this finds public images.
+//! carry. Public images need no login; credentials can be configured per
+//! registry (Docker Hub limits anonymous requests) and are sent only to that
+//! registry's own token endpoint.
 //!
 //! Only registries on the allow-list are contacted (see
 //! [`super::resolve::registry_allowed`]), because the registry host comes from
 //! the contents of a repository.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, WWW_AUTHENTICATE};
@@ -46,9 +49,96 @@ pub enum LookupError {
     Invalid(String),
 }
 
+/// A username and password (or access token) for one registry.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Credentials {
+    pub username: String,
+    pub password: String,
+}
+
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Credentials({}, ****)", self.username)
+    }
+}
+
+/// The key a registry's credentials are kept under, however the config file
+/// names it (`https://index.docker.io/v1/`, `registry-1.docker.io`, ...).
+pub fn registry_key(name: &str) -> String {
+    let name = name
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let host = name
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match host.as_str() {
+        "index.docker.io" | "registry-1.docker.io" | "registry.hub.docker.com" => {
+            "docker.io".into()
+        }
+        "lscr.io" => "ghcr.io".into(),
+        _ => host,
+    }
+}
+
+/// Reads credentials from a Docker `config.json` (the format of a Kubernetes
+/// `kubernetes.io/dockerconfigjson` Secret): `auths` maps registries to
+/// either a base64 `auth` of `user:password`, or `username` and `password`.
+pub fn parse_docker_config(json: &str) -> Result<HashMap<String, Credentials>, String> {
+    use base64::Engine;
+    let value: Value = serde_json::from_str(json).map_err(|e| format!("not JSON: {e}"))?;
+    let auths = value
+        .get("auths")
+        .and_then(Value::as_object)
+        .ok_or("no \"auths\" in it")?;
+    let mut found = HashMap::new();
+    for (registry, entry) in auths {
+        let pair = match entry.get("auth").and_then(Value::as_str) {
+            Some(auth) if !auth.is_empty() => base64::engine::general_purpose::STANDARD
+                .decode(auth.trim())
+                .ok()
+                .and_then(|raw| String::from_utf8(raw).ok())
+                .and_then(|s| {
+                    s.split_once(':')
+                        .map(|(u, p)| (u.to_string(), p.to_string()))
+                }),
+            _ => entry
+                .get("username")
+                .and_then(Value::as_str)
+                .zip(entry.get("password").and_then(Value::as_str))
+                .map(|(u, p)| (u.to_string(), p.to_string())),
+        };
+        let Some((username, password)) = pair.filter(|(u, p)| !u.is_empty() && !p.is_empty())
+        else {
+            return Err(format!("the entry for {registry} has no usable login"));
+        };
+        found.insert(registry_key(registry), Credentials { username, password });
+    }
+    Ok(found)
+}
+
+/// Whether a registry's login may be sent to `realm_host`: only to its own
+/// token endpoint, never wherever its challenge points.
+fn token_host_is_registrys(registry: &str, realm_host: &str) -> bool {
+    match registry {
+        "docker.io" => realm_host == "auth.docker.io",
+        other => realm_host == other || realm_host.ends_with(&format!(".{other}")),
+    }
+}
+
+/// The login to use at one registry, for the token request.
+#[derive(Clone, Copy)]
+struct Login<'a> {
+    registry: &'a str,
+    credentials: &'a Credentials,
+}
+
 #[derive(Clone, Debug)]
 pub struct RegistryClient {
     http: Client,
+    credentials: HashMap<String, Credentials>,
     extra_allowed: Vec<String>,
     /// Sends every registry's requests here instead (tests only).
     base_override: Option<String>,
@@ -65,9 +155,17 @@ impl RegistryClient {
                 .user_agent(concat!("donarium/", env!("CARGO_PKG_VERSION")))
                 .build()?,
             extra_allowed,
+            credentials: HashMap::new(),
             base_override: None,
             strict: true,
         })
+    }
+
+    /// Logs in with `credentials` (keyed by [`registry_key`]) at the registries
+    /// they are for.
+    pub fn with_credentials(mut self, credentials: HashMap<String, Credentials>) -> Self {
+        self.credentials = credentials;
+        self
     }
 
     /// A client that talks to `base` for every registry, with every registry
@@ -106,11 +204,16 @@ impl RegistryClient {
             .unwrap_or("latest");
 
         let mut token: Option<String> = None;
+        let login = self.credentials.get(registry).map(|credentials| Login {
+            registry,
+            credentials,
+        });
         let mut manifest = self
             .get_json(
                 &format!("{base}/v2/{repo}/manifests/{reference}"),
                 repo,
                 &mut token,
+                login,
                 true,
             )
             .await?;
@@ -127,6 +230,7 @@ impl RegistryClient {
                     &format!("{base}/v2/{repo}/manifests/{digest}"),
                     repo,
                     &mut token,
+                    login,
                     true,
                 )
                 .await?;
@@ -142,6 +246,7 @@ impl RegistryClient {
                 &format!("{base}/v2/{repo}/blobs/{config}"),
                 repo,
                 &mut token,
+                login,
                 false,
             )
             .await?;
@@ -153,6 +258,7 @@ impl RegistryClient {
         url: &str,
         repo: &str,
         token: &mut Option<String>,
+        login: Option<Login<'_>>,
         manifest: bool,
     ) -> Result<Value, LookupError> {
         for attempt in 0..2 {
@@ -174,7 +280,7 @@ impl RegistryClient {
                         .map_err(|e| LookupError::Invalid(format!("not JSON: {e}")));
                 }
                 StatusCode::UNAUTHORIZED if attempt == 0 && token.is_none() => {
-                    *token = Some(self.fetch_token(response.headers(), repo).await?);
+                    *token = Some(self.fetch_token(response.headers(), repo, login).await?);
                 }
                 StatusCode::NOT_FOUND => return Err(LookupError::NotFound),
                 StatusCode::TOO_MANY_REQUESTS => return Err(LookupError::RateLimited),
@@ -190,8 +296,14 @@ impl RegistryClient {
         ))
     }
 
-    /// Anonymous token for the challenge a registry answered with.
-    async fn fetch_token(&self, headers: &HeaderMap, repo: &str) -> Result<String, LookupError> {
+    /// A token for the challenge a registry answered with: anonymous, or with
+    /// the registry's login if it has one.
+    async fn fetch_token(
+        &self,
+        headers: &HeaderMap,
+        repo: &str,
+        login: Option<Login<'_>>,
+    ) -> Result<String, LookupError> {
         let challenge = headers
             .get(WWW_AUTHENTICATE)
             .and_then(|v| v.to_str().ok())
@@ -221,9 +333,26 @@ impl RegistryClient {
                 .unwrap_or_else(|| format!("repository:{repo}:pull"));
             query.append_pair("scope", &scope);
         }
-        let response = self
-            .http
-            .get(url)
+        let mut request = self.http.get(url.clone());
+        if let Some(login) = login {
+            // Tests talk to one mock server for every registry.
+            let own_endpoint = !self.strict
+                || url
+                    .host_str()
+                    .is_some_and(|host| token_host_is_registrys(login.registry, host));
+            if own_endpoint {
+                request = request.basic_auth(
+                    &login.credentials.username,
+                    Some(&login.credentials.password),
+                );
+            } else {
+                return Err(LookupError::Auth(format!(
+                    "refusing to send the login for {} to {realm}",
+                    login.registry
+                )));
+            }
+        }
+        let response = request
             .send()
             .await
             .map_err(|e| LookupError::Auth(describe(&e)))?;
@@ -409,6 +538,107 @@ mod tests {
                 .as_deref(),
             Some("https://github.com/jellyfin/jellyfin")
         );
+    }
+
+    #[test]
+    fn reads_a_docker_config() {
+        use base64::Engine;
+        let auth = base64::engine::general_purpose::STANDARD.encode("me:s3cret");
+        let json = format!(
+            r#"{{"auths": {{"https://index.docker.io/v1/": {{"auth": "{auth}"}}, "lscr.io": {{"username": "u", "password": "p"}}}}}}"#
+        );
+        let got = parse_docker_config(&json).unwrap();
+        assert_eq!(got["docker.io"].username, "me");
+        assert_eq!(got["docker.io"].password, "s3cret");
+        // lscr.io is read from ghcr.io, so its login is for ghcr.io.
+        assert_eq!(got["ghcr.io"].username, "u");
+        assert!(parse_docker_config("{}").is_err());
+        assert!(parse_docker_config(r#"{"auths": {"x.io": {"auth": "!!"}}}"#).is_err());
+        assert!(parse_docker_config(r#"{"auths": {"x.io": {}}}"#).is_err());
+        assert!(parse_docker_config("nope").is_err());
+        // The password never shows up in debug output.
+        let shown = format!("{:?}", got["docker.io"]);
+        assert!(!shown.contains("s3cret"), "{shown}");
+    }
+
+    #[test]
+    fn registries_have_one_name() {
+        for name in [
+            "https://index.docker.io/v1/",
+            "registry-1.docker.io",
+            "Docker.IO",
+            "registry.hub.docker.com",
+        ] {
+            assert_eq!(registry_key(name), "docker.io", "{name}");
+        }
+        assert_eq!(registry_key("https://GHCR.io/"), "ghcr.io");
+        assert_eq!(registry_key("quay.io"), "quay.io");
+    }
+
+    #[test]
+    fn a_login_goes_only_to_its_own_token_endpoint() {
+        assert!(token_host_is_registrys("docker.io", "auth.docker.io"));
+        assert!(!token_host_is_registrys("docker.io", "evil.example"));
+        assert!(!token_host_is_registrys(
+            "docker.io",
+            "docker.io.evil.example"
+        ));
+        assert!(token_host_is_registrys("ghcr.io", "ghcr.io"));
+        assert!(token_host_is_registrys("quay.io", "auth.quay.io"));
+        assert!(!token_host_is_registrys("ghcr.io", "evilghcr.io"));
+    }
+
+    #[tokio::test]
+    async fn logs_in_with_the_registrys_credentials() {
+        let server = MockServer::start().await;
+        let realm = format!("{}/token", server.uri());
+        Mock::given(method("GET"))
+            .and(path("/token"))
+            // base64("me:s3cret")
+            .and(header("authorization", "Basic bWU6czNjcmV0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"token": "T0K"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v2/o/app/manifests/latest"))
+            .and(header("authorization", "Bearer T0K"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"annotations": {SOURCE: "https://github.com/o/app"}})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v2/o/app/manifests/latest"))
+            .respond_with(ResponseTemplate::new(401).insert_header(
+                "www-authenticate",
+                format!(r#"Bearer realm="{realm}",service="registry.test""#),
+            ))
+            .mount(&server)
+            .await;
+        let creds = HashMap::from([(
+            "docker.io".to_string(),
+            Credentials {
+                username: "me".into(),
+                password: "s3cret".into(),
+            },
+        )]);
+        let client = RegistryClient::for_tests(&server.uri()).with_credentials(creds.clone());
+        assert_eq!(
+            client
+                .source_label(&image("o/app"))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("https://github.com/o/app")
+        );
+        // A registry without credentials asks for an anonymous token.
+        let other = RegistryClient::for_tests(&server.uri()).with_credentials(HashMap::from([(
+            "quay.io".to_string(),
+            creds["docker.io"].clone(),
+        )]));
+        assert!(other.source_label(&image("o/app")).await.is_err());
     }
 
     #[tokio::test]
