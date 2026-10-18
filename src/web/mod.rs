@@ -6,6 +6,7 @@ mod donations;
 mod pages;
 mod projects;
 mod receipts;
+mod recurring;
 mod sources;
 pub mod views;
 
@@ -269,6 +270,8 @@ pub fn router(state: AppState) -> Router {
         .route("/search", get(pages::search))
         .route("/donations", get(donations::index).post(donations::record))
         .route("/donations/export.csv", get(donations::export))
+        .route("/recurring", post(recurring::create))
+        .route("/recurring/{id}/end", post(recurring::end))
         .route("/donations/{id}/void", post(donations::void))
         .route("/donations/{id}/rate", post(donations::set_rate))
         .route(

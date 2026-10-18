@@ -66,6 +66,13 @@ async fn main() -> anyhow::Result<()> {
             std::time::Duration::from_secs(3600),
         );
     }
+    if !cfg.demo {
+        donarium::recurring::spawn(
+            store.clone(),
+            fx.clone(),
+            std::time::Duration::from_secs(3600),
+        );
+    }
     let demo_dev_auth = cfg.demo && cfg.auth.oidc_issuer.is_none();
     let auth = AuthMode::from_config(&cfg.auth, &cfg.public_url, demo_dev_auth)?;
     let cookie_key = load_cookie_key(&cfg)?;
