@@ -54,6 +54,27 @@ gitea:
     existingSecret: ""   # a read:repository token, for private repositories
     key: token
 
+# Receipts are found in a Paperless-ngx server and only linked, never copied.
+# Without a url the receipt feature is off. The token is sent only to this url.
+paperless:
+  url: ""              # e.g. https://paperless.example.com
+  tokenSecret:
+    existingSecret: ""   # an API token; required when a url is set
+    key: token
+
+# Receipts that exist nowhere else can be uploaded to an S3-compatible bucket.
+# Without an endpoint, uploads are off. Files are served to logged-in users
+# through five-minute presigned links.
+s3:
+  endpoint: ""         # e.g. https://s3.eu-west-1.amazonaws.com
+  region: us-east-1
+  bucket: ""
+  sse: false           # ask the storage to encrypt uploads (AES256)
+  credentialsSecret:
+    existingSecret: ""   # needs the two keys below
+    accessKeyKey: access-key
+    secretKeyKey: secret-key
+
 # GitHub sources. A token is only needed for private repositories, and gives a
 # higher rate limit (anonymous requests are limited to 60 an hour).
 github:

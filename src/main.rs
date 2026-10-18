@@ -12,6 +12,7 @@ use donarium::fx::{Fx, FxClient, spawn_retry};
 use donarium::metrics::Metrics;
 use donarium::model::Provider;
 use donarium::scan::fetch::ArchiveFetcher;
+use donarium::scan::funding::FundingFinder;
 use donarium::scan::registry::RegistryClient;
 use donarium::scan::run::{Scanner, spawn_scheduler};
 use donarium::store::Store;
@@ -77,7 +78,34 @@ async fn main() -> anyhow::Result<()> {
     let cookie_key = load_cookie_key(&cfg)?;
 
     let ops = web::ops_router(store.clone(), metrics, cfg.base_currency.clone());
-    let state = AppState::new(cfg.clone(), store, scanner, fx, auth, cookie_key);
+    let s3 = match (
+        &cfg.s3_endpoint,
+        &cfg.s3_bucket,
+        read_token(&cfg.s3_access_key_file)?,
+        read_token(&cfg.s3_secret_key_file)?,
+    ) {
+        (Some(endpoint), Some(bucket), Some(access_key), Some(secret_key)) => Some(
+            donarium::s3::S3::new(donarium::s3::S3Config {
+                endpoint: endpoint.clone(),
+                region: cfg.s3_region.clone(),
+                bucket: bucket.clone(),
+                access_key,
+                secret_key,
+                sse: cfg.s3_sse,
+            })
+            .context("building the S3 client")?,
+        ),
+        _ => None,
+    };
+    let mut state = AppState::new(cfg.clone(), store, scanner, fx, auth, cookie_key);
+    if let (Some(url), Some(token)) = (&cfg.paperless_url, read_token(&cfg.paperless_token_file)?) {
+        let paperless = donarium::receipts::Paperless::new(url.clone(), token)
+            .context("building the Paperless client")?;
+        state = state.with_paperless(paperless);
+    }
+    if let Some(s3) = s3 {
+        state = state.with_s3(s3);
+    }
     let app = web::router(state);
 
     let ui_listener = tokio::net::TcpListener::bind(cfg.listen).await?;
@@ -129,7 +157,17 @@ fn build_scanner(cfg: &Config, store: Arc<Store>) -> anyhow::Result<Scanner> {
     }
     let registry =
         RegistryClient::new(cfg.registry_allow.clone()).context("building the registry client")?;
-    Ok(Scanner::new(store, fetchers, registry))
+    let mut scanner = Scanner::new(store, fetchers, registry);
+    if !cfg.demo {
+        scanner = scanner.with_funding_finder(
+            FundingFinder::new(
+                cfg.github_api_url.clone(),
+                read_token(&cfg.github_token_file)?,
+            )
+            .context("building the GitHub funding client")?,
+        );
+    }
+    Ok(scanner)
 }
 
 fn init_tracing(json: bool) {

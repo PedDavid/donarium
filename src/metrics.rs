@@ -57,7 +57,9 @@ pub struct Metrics {
     donated_paid: Family<CurrencyLabels, FloatGauge>,
     donations: Gauge,
     unconverted: Gauge,
+    no_receipt: Gauge,
     last_donation: Family<ProjectLabels, Gauge>,
+    priority: Family<ProjectLabels, FloatGauge>,
     /// Exchange rate lookups by result (shared with [`crate::fx::Fx`]).
     pub fx_requests: Family<ResultLabels, Counter>,
     /// Held from refresh to encode, so a scrape never sees a half-built state.
@@ -115,11 +117,23 @@ impl Metrics {
             "Donations still waiting for their amount in the base currency",
             unconverted.clone(),
         );
+        let no_receipt = Gauge::default();
+        registry.register(
+            "donarium_donations_without_receipt",
+            "Donations that count and have no receipt linked",
+            no_receipt.clone(),
+        );
         let last_donation = Family::default();
         registry.register(
             "donarium_last_donation_timestamp_seconds",
             "Unix time of the last donation to a project (the day, at 00:00 UTC)",
             last_donation.clone(),
+        );
+        let priority = Family::default();
+        registry.register(
+            "donarium_project_priority",
+            "Ranking priority (usage share times staleness) of the 20 projects to support next",
+            priority.clone(),
         );
         let fx_requests = Family::<ResultLabels, Counter>::default();
         for result in FX_RESULTS {
@@ -143,7 +157,9 @@ impl Metrics {
             donated_paid,
             donations,
             unconverted,
+            no_receipt,
             last_donation,
+            priority,
             scrape: Mutex::new(()),
         })
     }
@@ -190,6 +206,8 @@ impl Metrics {
         }
         self.donations.set(totals.count as i64);
         self.unconverted.set(totals.unconverted as i64);
+        self.no_receipt
+            .set(store.donations_without_receipt().await?);
         for p in &projects {
             if let Some(at) = p.last_donation {
                 self.last_donation
@@ -198,6 +216,15 @@ impl Metrics {
                     })
                     .set(at.as_second());
             }
+        }
+        self.priority.clear();
+        let ranking = crate::ranking::rank(&projects, jiff::Zoned::now().date());
+        for r in ranking.projects.iter().filter(|r| r.can_donate).take(20) {
+            self.priority
+                .get_or_create(&ProjectLabels {
+                    project: r.name.clone(),
+                })
+                .set(r.priority);
         }
         self.scan_time.clear();
         self.scan_ok.clear();

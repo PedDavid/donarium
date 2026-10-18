@@ -10,6 +10,7 @@
         <th>Amount</th>
         <th class="hidden md:table-cell">Via</th>
         <th class="hidden lg:table-cell">Note</th>
+        <th class="hidden md:table-cell">Receipt</th>
         {% if layout.admin %}<th><span class="sr-only">Actions</span></th>{% endif %}
       </tr>
     </thead>
@@ -41,6 +42,23 @@
           <div class="text-xs text-muted-foreground">{{ d.kind }}</div>
         </td>
         <td class="hidden lg:table-cell break-words max-w-xs">{{ d.note }}<div class="text-xs text-muted-foreground">recorded by {{ d.recorded_by }}</div></td>
+        <td class="hidden md:table-cell">
+          {% for r in d.receipts %}
+          <div class="flex items-center gap-1 text-sm">
+            <a href="{{ r.url }}" class="hover:underline" target="_blank" rel="noopener noreferrer" title="Opens the document in Paperless">{{ r.title }}</a>
+            {% if layout.admin %}
+            <form method="post" action="/receipts/{{ r.id }}/delete">
+              <input type="hidden" name="_csrf" value="{{ layout.csrf }}">
+              <input type="hidden" name="project" value="{{ filter }}">
+              <button type="submit" class="btn" data-variant="ghost" data-size="sm" title="Forgets the link. The document stays in Paperless." aria-label="Unlink {{ r.title }}">×</button>
+            </form>
+            {% endif %}
+          </div>
+          {% endfor %}
+          {% if d.receipts.is_empty() && d.voided.is_empty() %}
+          {% if layout.admin && d.can_link %}<a href="/donations/{{ d.id }}/receipt" class="btn" data-variant="outline" data-size="sm">Find receipt</a>{% else %}<span class="text-xs text-muted-foreground">none</span>{% endif %}
+          {% endif %}
+        </td>
         {% if layout.admin %}
         <td class="text-end">
           {% if d.voided.is_empty() %}

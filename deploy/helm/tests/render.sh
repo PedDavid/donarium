@@ -71,6 +71,33 @@ env=$(yq 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env'
 [[ -z $(yq 'select(.kind == "Deployment") | .spec.template.spec.volumes[] | select(.name == "gitea-token")' <<<"$out") ]] \
   || fail "a Gitea token Secret is mounted without a URL"
 
+# Paperless: both the URL and the token Secret are needed, and then both are passed.
+out=$(render --set paperless.url=https://paperless.example.com --set paperless.tokenSecret.existingSecret=pl)
+env=$(yq 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env' <<<"$out")
+[[ $(yq '.[] | select(.name == "DONARIUM_PAPERLESS_URL") | .value' <<<"$env") == https://paperless.example.com ]] || fail "the Paperless URL is not passed"
+[[ $(yq '.[] | select(.name == "DONARIUM_PAPERLESS_TOKEN_FILE") | .value' <<<"$env") == /etc/donarium/paperless/token ]] || fail "the Paperless token file is not passed"
+[[ $(yq 'select(.kind == "Deployment") | .spec.template.spec.volumes[] | select(.name == "paperless-token") | .secret.secretName' <<<"$out") == pl ]] || fail "the Paperless Secret is not mounted"
+for partial in "--set paperless.url=https://paperless.example.com" "--set paperless.tokenSecret.existingSecret=pl"; do
+  out=$(render $partial)
+  [[ -z $(yq 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env[] | select(.name == "DONARIUM_PAPERLESS_URL" or .name == "DONARIUM_PAPERLESS_TOKEN_FILE")' <<<"$out") ]] \
+    || fail "Paperless is half configured ($partial)"
+done
+
+# S3 uploads: endpoint, bucket and credentials are all needed.
+s3args=(--set s3.endpoint=https://s3.example.com --set s3.bucket=receipts --set s3.credentialsSecret.existingSecret=s3c)
+out=$(render "${s3args[@]}" --set s3.sse=true)
+env=$(yq 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env' <<<"$out")
+for pair in DONARIUM_S3_BUCKET:receipts DONARIUM_S3_ACCESS_KEY_FILE:/etc/donarium/s3/access-key DONARIUM_S3_SECRET_KEY_FILE:/etc/donarium/s3/secret-key DONARIUM_S3_SSE:true; do
+  [[ $(yq ".[] | select(.name == \"${pair%%:*}\") | .value" <<<"$env") == "${pair#*:}" ]] || fail "${pair%%:*} is not passed"
+done
+[[ $(yq 'select(.kind == "Deployment") | .spec.template.spec.volumes[] | select(.name == "s3-credentials") | .secret.secretName' <<<"$out") == s3c ]] || fail "the S3 Secret is not mounted"
+for skip in 0 1 2; do
+  partial=("${s3args[@]}"); unset "partial[$((skip * 2)) ]" "partial[$((skip * 2 + 1))]"
+  out=$(render "${partial[@]}")
+  [[ -z $(yq 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env[] | select(.name | test("^DONARIUM_S3_"))' <<<"$out") ]] \
+    || fail "S3 is half configured"
+done
+
 # The base currency reaches the container, EUR unless set.
 env=$(render | yq 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env')
 [[ $(yq '.[] | select(.name == "DONARIUM_BASE_CURRENCY") | .value' <<<"$env") == EUR ]] || fail "the base currency default is not EUR"
