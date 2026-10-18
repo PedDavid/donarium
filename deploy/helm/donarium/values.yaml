@@ -54,6 +54,14 @@ gitea:
     existingSecret: ""   # a read:repository token, for private repositories
     key: token
 
+# Receipts are found in a Paperless-ngx server and only linked, never copied.
+# Without a url the receipt feature is off. The token is sent only to this url.
+paperless:
+  url: ""              # e.g. https://paperless.example.com
+  tokenSecret:
+    existingSecret: ""   # an API token; required when a url is set
+    key: token
+
 # GitHub sources. A token is only needed for private repositories, and gives a
 # higher rate limit (anonymous requests are limited to 60 an hour).
 github:

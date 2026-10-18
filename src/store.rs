@@ -14,7 +14,8 @@ use sqlx::{Row, SqlitePool};
 use crate::fx::Rate;
 use crate::model::{
     Actor, Conversion, Donation, DonationKind, Funding, FxSource, NewDonation, NewSource, Origin,
-    Project, ProjectUpdate, Provider, ScanMethod, Source, SourceUpdate, TRANSITIVE_FACTOR, Totals,
+    Project, ProjectUpdate, Provider, Receipt, ScanMethod, Source, SourceUpdate, TRANSITIVE_FACTOR,
+    Totals,
 };
 use crate::scan::manifests::{ImageUse, Skipped};
 use crate::scan::resolve::slug;
@@ -612,6 +613,79 @@ impl Store {
         .await?;
         tx.commit().await?;
         self.get_donation(id).await?.ok_or(StoreError::NotFound)
+    }
+
+    /// Points a donation at a Paperless document. Linking it twice is a no-op.
+    pub async fn link_receipt(
+        &self,
+        donation_id: i64,
+        reference: &str,
+        title: &str,
+        by: &Actor,
+        now: Timestamp,
+    ) -> Result<(), StoreError> {
+        let donation = self
+            .get_donation(donation_id)
+            .await?
+            .ok_or(StoreError::NotFound)?;
+        if donation.voided.is_some() {
+            return Err(StoreError::InUse(
+                "a voided donation cannot get a receipt".into(),
+            ));
+        }
+        sqlx::query(
+            "INSERT OR IGNORE INTO receipt (donation_id, store, reference, title, linked_by, linked_at)
+             VALUES (?, 'paperless', ?, ?, ?, ?)",
+        )
+        .bind(donation_id)
+        .bind(reference)
+        .bind(title)
+        .bind(&by.sub)
+        .bind(now.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Donations that count and have no receipt linked.
+    pub async fn donations_without_receipt(&self) -> Result<i64, StoreError> {
+        Ok(sqlx::query_scalar(
+            "SELECT COUNT(*) FROM donation d
+             WHERE d.voids_id IS NULL
+               AND NOT EXISTS (SELECT 1 FROM donation v WHERE v.voids_id = d.id)
+               AND NOT EXISTS (SELECT 1 FROM receipt r WHERE r.donation_id = d.id)",
+        )
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    pub async fn unlink_receipt(&self, id: i64) -> Result<(), StoreError> {
+        let done = sqlx::query("DELETE FROM receipt WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        if done.rows_affected() == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Every linked receipt, for showing next to the donations.
+    pub async fn list_receipts(&self) -> Result<Vec<Receipt>, StoreError> {
+        sqlx::query("SELECT id, donation_id, reference, title, linked_by FROM receipt ORDER BY id")
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(|r| {
+                Ok(Receipt {
+                    id: r.try_get("id")?,
+                    donation_id: r.try_get("donation_id")?,
+                    reference: r.try_get("reference")?,
+                    title: r.try_get("title")?,
+                    linked_by: r.try_get("linked_by")?,
+                })
+            })
+            .collect()
     }
 
     /// Cancels a donation with a void entry. The donation stays in the history,
@@ -2034,6 +2108,56 @@ mod tests {
             .execute(store.pool())
             .await;
         assert!(other.is_err());
+    }
+
+    #[tokio::test]
+    async fn receipts_are_links_that_can_be_removed() {
+        let store = store_with_project().await;
+        let d = store
+            .record_donation(
+                &donation("tokio-rs-tokio", 1000, "EUR", date(2026, 3, 1), Some(1000)),
+                &actor(),
+                now(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.donations_without_receipt().await.unwrap(), 1);
+        store
+            .link_receipt(d.id, "42", "Receipt", &actor(), now())
+            .await
+            .unwrap();
+        // The same document twice is one link.
+        store
+            .link_receipt(d.id, "42", "Receipt", &actor(), now())
+            .await
+            .unwrap();
+        let all = store.list_receipts().await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(
+            (all[0].donation_id, all[0].title.as_str()),
+            (d.id, "Receipt")
+        );
+        assert_eq!(store.donations_without_receipt().await.unwrap(), 0);
+
+        // The donation itself stays untouched, and unlinking brings it back.
+        store.unlink_receipt(all[0].id).await.unwrap();
+        assert!(matches!(
+            store.unlink_receipt(all[0].id).await,
+            Err(StoreError::NotFound)
+        ));
+        assert_eq!(store.donations_without_receipt().await.unwrap(), 1);
+
+        // A voided donation takes no receipt, and does not count as missing one.
+        store.void_donation(d.id, &actor(), now()).await.unwrap();
+        assert!(matches!(
+            store.link_receipt(d.id, "43", "", &actor(), now()).await,
+            Err(StoreError::InUse(_))
+        ));
+        assert_eq!(store.donations_without_receipt().await.unwrap(), 0);
+        assert!(matches!(
+            store.link_receipt(9999, "1", "", &actor(), now()).await,
+            Err(StoreError::NotFound)
+        ));
     }
 
     #[tokio::test]

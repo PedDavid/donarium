@@ -2245,3 +2245,205 @@ async fn setting_a_rate_needs_admin_csrf_and_origin() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
+
+mod receipts {
+    use super::*;
+    use common::harness_paperless;
+    use serde_json::json;
+    use wiremock::matchers::{header, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn paperless() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/documents/"))
+            .and(header("Authorization", "Token test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "count": 1,
+                "results": [{"id": 42, "title": "Receipt <b>Sponsors</b>", "created": "2026-09-26"}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/documents/42/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"id": 42, "title": "GitHub Sponsors receipt", "created": "2026-09-26"}),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/documents/99/"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn a_receipt_is_found_linked_and_unlinked() {
+        let server = paperless().await;
+        let h = harness_paperless(&server.uri()).await;
+        let admin = session_cookie(&h.key, &session(true));
+        let id = h
+            .store
+            .list_donations(Some("bigskysoftware-htmx"))
+            .await
+            .unwrap()[0]
+            .id;
+
+        // Every donation offers to find a receipt.
+        let html = body(
+            h.app
+                .clone()
+                .oneshot(get("/donations", &admin))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(html.contains(&format!("/donations/{id}/receipt")));
+
+        // Suggestions come from the date, and titles are escaped.
+        let res = h
+            .app
+            .clone()
+            .oneshot(get(&format!("/donations/{id}/receipt"), &admin))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let html = body(res).await;
+        assert!(html.contains("within a week"));
+        assert!(
+            html.contains("Receipt &#60;b&#62;Sponsors")
+                || html.contains("Receipt &lt;b&gt;Sponsors")
+        );
+        assert!(!html.contains("<b>Sponsors"));
+
+        // Linking needs the CSRF token, and the document has to exist.
+        let bad = [("_csrf", "wrong"), ("document", "42")];
+        let res = h
+            .app
+            .clone()
+            .oneshot(post(&format!("/donations/{id}/receipt"), &admin, &bad))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let missing = [("_csrf", "csrf-token"), ("document", "99")];
+        let res = h
+            .app
+            .clone()
+            .oneshot(post(&format!("/donations/{id}/receipt"), &admin, &missing))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let junk = [("_csrf", "csrf-token"), ("document", "../x")];
+        let res = h
+            .app
+            .clone()
+            .oneshot(post(&format!("/donations/{id}/receipt"), &admin, &junk))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let ok = [("_csrf", "csrf-token"), ("document", "42")];
+        let res = h
+            .app
+            .clone()
+            .oneshot(post(&format!("/donations/{id}/receipt"), &admin, &ok))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        // Linking twice keeps one link.
+        h.app
+            .clone()
+            .oneshot(post(&format!("/donations/{id}/receipt"), &admin, &ok))
+            .await
+            .unwrap();
+        assert_eq!(h.store.list_receipts().await.unwrap().len(), 1);
+
+        let html = body(
+            h.app
+                .clone()
+                .oneshot(get("/donations", &admin))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(html.contains("GitHub Sponsors receipt"));
+        assert!(html.contains(&format!("{}/documents/42/details", server.uri())));
+
+        let rid = h.store.list_receipts().await.unwrap()[0].id;
+        let res = h
+            .app
+            .clone()
+            .oneshot(post(
+                &format!("/receipts/{rid}/delete"),
+                &admin,
+                &[("_csrf", "csrf-token"), ("project", "")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert!(h.store.list_receipts().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn only_admins_link_receipts_and_a_search_can_name_what_to_find() {
+        let server = paperless().await;
+        let h = harness_paperless(&server.uri()).await;
+        let user = session_cookie(&h.key, &session(false));
+        let res = h
+            .app
+            .clone()
+            .oneshot(get("/donations/1/receipt", &user))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let res = h
+            .app
+            .clone()
+            .oneshot(post(
+                "/donations/1/receipt",
+                &user,
+                &[("_csrf", "csrf-token"), ("document", "42")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        Mock::given(method("GET"))
+            .and(path("/api/documents/"))
+            .and(query_param("query", "paperless"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"results": []})))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let admin = session_cookie(&h.key, &session(true));
+        let res = h
+            .app
+            .oneshot(get("/donations/1/receipt?q=paperless", &admin))
+            .await
+            .unwrap();
+        assert!(body(res).await.contains("Nothing matches"));
+    }
+
+    #[tokio::test]
+    async fn without_paperless_there_is_nothing_to_link() {
+        let h = harness(false).await;
+        let admin = session_cookie(&h.key, &session(true));
+        let html = body(
+            h.app
+                .clone()
+                .oneshot(get("/donations", &admin))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(!html.contains("Find receipt"));
+        let res = h
+            .app
+            .oneshot(get("/donations/1/receipt", &admin))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+}

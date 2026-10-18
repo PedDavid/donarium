@@ -551,6 +551,9 @@
     .sm\:table-cell {
       display: table-cell;
     }
+    .sm\:max-w-md {
+      max-width: var(--container-md);
+    }
     .sm\:max-w-xl {
       max-width: var(--container-xl);
     }
