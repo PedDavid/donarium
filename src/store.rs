@@ -917,6 +917,46 @@ impl Store {
         Ok(())
     }
 
+    /// Which sources use a project, and how much each contributes to its score
+    /// (a disabled source contributes nothing).
+    pub async fn usage_breakdown(&self, name: &str) -> Result<Vec<UsageEntry>, StoreError> {
+        sqlx::query(
+            "SELECT s.id AS source_id, s.provider, s.repo, s.enabled, s.weight, u.via, u.kind
+               FROM usage u
+               JOIN source s ON s.id = u.source_id
+               JOIN project p ON p.id = u.project_id
+              WHERE p.name = ?
+              ORDER BY s.repo COLLATE NOCASE, u.via",
+        )
+        .bind(name)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|r| {
+            let provider: String = r.try_get("provider")?;
+            let kind: String = r.try_get("kind")?;
+            let enabled: bool = r.try_get("enabled")?;
+            let weight: f64 = r.try_get("weight")?;
+            let factor = if kind == "direct" {
+                1.0
+            } else {
+                TRANSITIVE_FACTOR
+            };
+            Ok(UsageEntry {
+                source_id: r.try_get("source_id")?,
+                provider: Provider::parse(&provider)
+                    .ok_or_else(|| corrupt("provider", &provider))?,
+                repo: r.try_get("repo")?,
+                enabled,
+                weight,
+                via: r.try_get("via")?,
+                direct: kind == "direct",
+                contribution: if enabled { weight * factor } else { 0.0 },
+            })
+        })
+        .collect()
+    }
+
     // --- projects ---
 
     /// All projects, ordered by name. The usage score is what enabled sources
@@ -1238,6 +1278,21 @@ async fn upsert_project(
     .bind(stamp)
     .fetch_one(&mut *tx)
     .await?)
+}
+
+/// One source's use of a project.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UsageEntry {
+    pub source_id: i64,
+    pub provider: Provider,
+    pub repo: String,
+    pub enabled: bool,
+    pub weight: f64,
+    /// Which scan found it: `images` or `dependencies`.
+    pub via: String,
+    pub direct: bool,
+    /// What it adds to the project's usage score.
+    pub contribution: f64,
 }
 
 /// A donation waiting for its amount in the base currency.
@@ -1582,6 +1637,70 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(left, 0);
+    }
+
+    #[tokio::test]
+    async fn usage_breakdown_lists_each_source_with_its_contribution() {
+        let store = Store::memory().await.unwrap();
+        let heavy = store
+            .create_source(&new_source("me/heavy"), &actor(), now())
+            .await
+            .unwrap();
+        let mut light = new_source("me/light");
+        light.weight = 0.4;
+        let light = store.create_source(&light, &actor(), now()).await.unwrap();
+        sqlx::query("INSERT INTO project (id, name, repo, first_seen_at, last_seen_at) VALUES (1, 'a-b', 'github.com/a/b', 'x', 'x')")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        for (source, via, kind) in [
+            (heavy.id, "images", "direct"),
+            (heavy.id, "dependencies", "transitive"),
+            (light.id, "dependencies", "transitive"),
+        ] {
+            sqlx::query("INSERT INTO usage (source_id, project_id, via, kind) VALUES (?, 1, ?, ?)")
+                .bind(source)
+                .bind(via)
+                .bind(kind)
+                .execute(store.pool())
+                .await
+                .unwrap();
+        }
+        let usage = store.usage_breakdown("a-b").await.unwrap();
+        assert_eq!(usage.len(), 3);
+        assert_eq!(usage[0].repo, "me/heavy");
+        assert!(
+            usage
+                .iter()
+                .any(|u| u.via == "images" && u.direct && u.contribution == 1.0)
+        );
+        assert!(
+            usage
+                .iter()
+                .any(|u| u.repo == "me/light" && !u.direct && (u.contribution - 0.1).abs() < 1e-9)
+        );
+        // A disabled source contributes nothing, but is still listed.
+        store
+            .update_source(
+                light.id,
+                &SourceUpdate {
+                    weight: 0.4,
+                    scan_method: ScanMethod::Auto,
+                    enabled: false,
+                },
+                &actor(),
+                now(),
+            )
+            .await
+            .unwrap();
+        let usage = store.usage_breakdown("a-b").await.unwrap();
+        assert!(
+            usage
+                .iter()
+                .filter(|u| u.repo == "me/light")
+                .all(|u| !u.enabled && u.contribution == 0.0)
+        );
+        assert!(store.usage_breakdown("nope").await.unwrap().is_empty());
     }
 
     #[tokio::test]

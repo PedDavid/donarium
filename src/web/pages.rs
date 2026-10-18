@@ -96,6 +96,9 @@ impl Feedback {
 pub struct Filters {
     #[serde(default)]
     pub q: String,
+    /// How the list is ordered: empty for priority, or `name`, `usage`, `last`.
+    #[serde(default)]
+    pub sort: String,
 }
 
 pub(super) fn is_htmx(headers: &HeaderMap, target: &str) -> bool {
