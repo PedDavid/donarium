@@ -1,0 +1,13 @@
+{{- if .Values.grafanaDashboard.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "donarium.fullname" . }}-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "donarium.labels" . | nindent 4 }}
+    {{ .Values.grafanaDashboard.label }}: {{ .Values.grafanaDashboard.labelValue | quote }}
+data:
+  donarium.json: |-
+    {{- .Files.Get "files/dashboard.json" | nindent 4 }}
+{{- end }}
