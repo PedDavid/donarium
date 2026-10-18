@@ -363,13 +363,44 @@ pub struct Totals {
     pub by_year: Vec<(i32, i64)>,
 }
 
-/// A document in Paperless-ngx that a donation points to.
+/// A file that was uploaded to the bucket, about to be recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewUpload {
+    pub key: String,
+    pub filename: String,
+    pub content_type: String,
+    pub size: i64,
+    pub sha256: String,
+}
+
+/// Where a receipt lives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiptStore {
+    /// A document in Paperless-ngx, linked by id.
+    Paperless,
+    /// A file uploaded to the S3 bucket.
+    S3,
+}
+
+impl ReceiptStore {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReceiptStore::Paperless => "paperless",
+            ReceiptStore::S3 => "s3",
+        }
+    }
+}
+
+/// What a donation points to as its receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Receipt {
     pub id: i64,
     pub donation_id: i64,
-    /// The document's id in Paperless.
+    pub store: ReceiptStore,
+    /// Paperless: the document's id. S3: the object's key.
     pub reference: String,
+    /// The document's title, or the uploaded file's name.
     pub title: String,
+    pub content_type: Option<String>,
     pub linked_by: String,
 }

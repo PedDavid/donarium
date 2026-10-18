@@ -61,6 +61,22 @@ spec:
             - name: DONARIUM_PAPERLESS_TOKEN_FILE
               value: /etc/donarium/paperless/{{ .Values.paperless.tokenSecret.key }}
             {{- end }}
+            {{- if and .Values.s3.endpoint .Values.s3.bucket .Values.s3.credentialsSecret.existingSecret }}
+            - name: DONARIUM_S3_ENDPOINT
+              value: {{ .Values.s3.endpoint | quote }}
+            - name: DONARIUM_S3_REGION
+              value: {{ .Values.s3.region | quote }}
+            - name: DONARIUM_S3_BUCKET
+              value: {{ .Values.s3.bucket | quote }}
+            - name: DONARIUM_S3_ACCESS_KEY_FILE
+              value: /etc/donarium/s3/{{ .Values.s3.credentialsSecret.accessKeyKey }}
+            - name: DONARIUM_S3_SECRET_KEY_FILE
+              value: /etc/donarium/s3/{{ .Values.s3.credentialsSecret.secretKeyKey }}
+            {{- if .Values.s3.sse }}
+            - name: DONARIUM_S3_SSE
+              value: "true"
+            {{- end }}
+            {{- end }}
             {{- if .Values.github.tokenSecret.existingSecret }}
             - name: DONARIUM_GITHUB_TOKEN_FILE
               value: /etc/donarium/github/{{ .Values.github.tokenSecret.key }}
@@ -138,6 +154,11 @@ spec:
               mountPath: /etc/donarium/gitlab
               readOnly: true
             {{- end }}
+            {{- if and .Values.s3.endpoint .Values.s3.bucket .Values.s3.credentialsSecret.existingSecret }}
+            - name: s3-credentials
+              mountPath: /etc/donarium/s3
+              readOnly: true
+            {{- end }}
             {{- if and .Values.paperless.url .Values.paperless.tokenSecret.existingSecret }}
             - name: paperless-token
               mountPath: /etc/donarium/paperless
@@ -173,6 +194,11 @@ spec:
         - name: gitlab-token
           secret:
             secretName: {{ .Values.gitlab.tokenSecret.existingSecret }}
+        {{- end }}
+        {{- if and .Values.s3.endpoint .Values.s3.bucket .Values.s3.credentialsSecret.existingSecret }}
+        - name: s3-credentials
+          secret:
+            secretName: {{ .Values.s3.credentialsSecret.existingSecret }}
         {{- end }}
         {{- if and .Values.paperless.url .Values.paperless.tokenSecret.existingSecret }}
         - name: paperless-token
