@@ -64,6 +64,16 @@ Every donation that counts can be downloaded as a CSV file
 paid, the amount in the base currency, the rate used and where it came from.
 Voided donations are left out.
 
+## Finding how to donate
+
+For GitHub projects Donarium reads the `.github/FUNDING.yml` the project (or its
+account's `.github` repository) publishes, and lists what it declares: GitHub
+Sponsors, Open Collective, Ko-fi, Liberapay, Patreon, thanks.dev, `custom` links
+(https only) and a few link-only platforms. An admin can ask for it on a
+project's page; after each scheduled scan, up to 20 projects not checked for a
+week are looked up too, stopping when GitHub rate limits. What is found is
+replaced on each lookup; what an admin added by hand is never touched.
+
 ## Receipts
 
 With `--paperless-url` and `--paperless-token-file` (an API token), each

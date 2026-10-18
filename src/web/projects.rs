@@ -34,6 +34,8 @@ fn notice(code: &str) -> &'static str {
         "deleted" => "Project deleted.",
         "funding-added" => "Way to donate added.",
         "funding-removed" => "Way to donate removed.",
+        "funding-found" => "Looked at the project's FUNDING.yml: its ways to donate are listed.",
+        "funding-none" => "The project declares no ways to donate in a FUNDING.yml.",
         _ => "",
     }
 }
@@ -312,6 +314,8 @@ struct DetailPage {
     layout: Layout,
     project: ProjectRow,
     links: Vec<FundingLink>,
+    /// The project's FUNDING.yml can be looked up (a GitHub project, and GitHub is reachable).
+    can_discover: bool,
     platforms: Vec<(&'static str, &'static str, bool)>,
     notice: &'static str,
     error: String,
@@ -405,6 +409,8 @@ async fn render_detail(
         standing,
         usage,
         links: project.funding.iter().map(FundingLink::new).collect(),
+        can_discover: ctx.state.inner.scanner.can_find_funding()
+            && project.repo.starts_with("github.com/"),
         project: ProjectRow::new(&project, ctx.state.now()),
         platforms,
         notice: feedback.notice,
@@ -525,6 +531,48 @@ pub async fn add_funding(
             render_detail(&ctx, &name, None, Some(values), rejected).await
         }
         Err(e) => Err(e.into()),
+    }
+}
+
+pub async fn discover_funding(
+    State(state): State<AppState>,
+    Admin(session): Admin,
+    jar: CookieJar,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Form(form): Form<CsrfOnly>,
+) -> Result<Response, AppError> {
+    session.check_csrf(&headers, form.csrf.as_deref())?;
+    let ctx = Ctx {
+        state: &state,
+        session: &session,
+        jar: &jar,
+    };
+    let project = state
+        .inner
+        .store
+        .get_project(&name)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("no project named {name:?}")))?;
+    match state
+        .inner
+        .scanner
+        .discover_funding(&name, &project.repo)
+        .await
+    {
+        Ok(n) => {
+            info!(actor = %session.sub, project = %name, found = n, "funding looked up");
+            let code = if n > 0 {
+                "funding-found"
+            } else {
+                "funding-none"
+            };
+            Ok(Redirect::to(&format!("/projects/{name}?notice={code}")).into_response())
+        }
+        Err(e) => {
+            let rejected = Feedback::rejected(e.to_string(), StatusCode::BAD_GATEWAY);
+            render_detail(&ctx, &name, None, None, rejected).await
+        }
     }
 }
 
