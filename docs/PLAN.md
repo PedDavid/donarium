@@ -227,7 +227,7 @@ relative to how much you use them?*
 ```
 priority = usage_share × staleness
 usage_share = usage_score / Σ usage_score        (0..1)
-staleness   = 1 + days_since_last_donation / 365   (capped, never donated = max)
+staleness   = 1 + min(days_since_last_donation, 1095) / 365   (never donated = 4.0, the cap)
 ```
 
 - Projects with no way to donate and `ignore: true` projects are excluded from
@@ -241,7 +241,7 @@ The **detail view** shows the full picture behind the number:
 - Usage: which of your sources use it, direct or transitive, and the score.
 - Time: last donation, and a timeline of all donations.
 - Fair share: total donated vs usage share, as a "target vs actual" bar
-  (`target = usage_share × total_ever_donated`).
+  (`fair share = usage_share × total donated`, ignored projects excluded).
 - Funding: discovered channels with links, and which are not available.
 - Need/health: maintainers, last release and commit, whether the project is
   company-backed (from the GitHub API and ecosyste.ms). Informational only
@@ -375,7 +375,7 @@ pub trait ReceiptStore: Send + Sync {
 | `donarium_donations` | Number of donations that count | yes |
 | `donarium_donations_without_conversion` | Donations still missing a base amount | yes |
 | `donarium_fx_requests_total{result}` | Rate lookups: ok, unsupported, rate_limited, error | yes |
-| `donarium_project_priority{project}` | Ranking value (top N only, to bound cardinality) | with ranking |
+| `donarium_project_priority{project}` | Ranking value (top N only, to bound cardinality) | yes |
 | `donarium_donations_without_receipt` | Receipt hygiene | yes |
 | `donarium_receipt_store_healthy{store}` | | with S3 |
 

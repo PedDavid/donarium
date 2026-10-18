@@ -105,6 +105,43 @@ async fn detail_and_not_found() {
 }
 
 #[tokio::test]
+async fn the_list_is_ranked_and_the_detail_explains_it() {
+    let h = harness(false).await;
+    let cookie = session_cookie(&h.key, &session(false));
+    let res = h.app.clone().oneshot(get("/", &cookie)).await.unwrap();
+    let html = body(res).await;
+    assert!(html.contains("Highest priority first"));
+    assert!(html.contains("no way to donate yet"));
+
+    let res = h
+        .app
+        .clone()
+        .oneshot(get("/?sort=name", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = h
+        .app
+        .clone()
+        .oneshot(get("/projects/bigskysoftware-htmx", &cookie))
+        .await
+        .unwrap();
+    let html = body(res).await;
+    assert!(html.contains("Ranking"));
+    assert!(html.contains("fair share"));
+    assert!(html.contains("<progress"));
+    assert!(html.contains("Used by"));
+
+    let res = h
+        .ops
+        .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert!(body(res).await.contains("donarium_project_priority{"));
+}
+
+#[tokio::test]
 async fn search_returns_matching_projects() {
     let h = harness(false).await;
     let cookie = session_cookie(&h.key, &session(false));
