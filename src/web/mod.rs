@@ -268,6 +268,7 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(projects::index))
         .route("/search", get(pages::search))
         .route("/donations", get(donations::index).post(donations::record))
+        .route("/donations/export.csv", get(donations::export))
         .route("/donations/{id}/void", post(donations::void))
         .route("/donations/{id}/rate", post(donations::set_rate))
         .route(
