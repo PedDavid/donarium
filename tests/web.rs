@@ -105,6 +105,43 @@ async fn detail_and_not_found() {
 }
 
 #[tokio::test]
+async fn the_list_is_ranked_and_the_detail_explains_it() {
+    let h = harness(false).await;
+    let cookie = session_cookie(&h.key, &session(false));
+    let res = h.app.clone().oneshot(get("/", &cookie)).await.unwrap();
+    let html = body(res).await;
+    assert!(html.contains("Highest priority first"));
+    assert!(html.contains("no way to donate yet"));
+
+    let res = h
+        .app
+        .clone()
+        .oneshot(get("/?sort=name", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = h
+        .app
+        .clone()
+        .oneshot(get("/projects/bigskysoftware-htmx", &cookie))
+        .await
+        .unwrap();
+    let html = body(res).await;
+    assert!(html.contains("Ranking"));
+    assert!(html.contains("fair share"));
+    assert!(html.contains("<progress"));
+    assert!(html.contains("Used by"));
+
+    let res = h
+        .ops
+        .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert!(body(res).await.contains("donarium_project_priority{"));
+}
+
+#[tokio::test]
 async fn search_returns_matching_projects() {
     let h = harness(false).await;
     let cookie = session_cookie(&h.key, &session(false));
@@ -2207,6 +2244,514 @@ async fn setting_a_rate_needs_admin_csrf_and_origin() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn donations_download_as_csv_for_a_year() {
+    let h = harness(false).await;
+    let user = session_cookie(&h.key, &session(false));
+    let res = h
+        .app
+        .clone()
+        .oneshot(get("/donations/export.csv", &user))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()[header::CONTENT_TYPE],
+        "text/csv; charset=utf-8"
+    );
+    assert_eq!(
+        res.headers()[header::CONTENT_DISPOSITION],
+        "attachment; filename=\"donarium-donations.csv\""
+    );
+    let all = body(res).await;
+    assert!(all.starts_with("date,project,"));
+    assert_eq!(
+        all.matches("\r\n").count(),
+        1 + 4,
+        "the header and 4 donations"
+    );
+
+    let res = h
+        .app
+        .clone()
+        .oneshot(get("/donations/export.csv?year=1999", &user))
+        .await
+        .unwrap();
+    assert_eq!(
+        res.headers()[header::CONTENT_DISPOSITION],
+        "attachment; filename=\"donarium-donations-1999.csv\""
+    );
+    assert_eq!(body(res).await.matches("\r\n").count(), 1);
+
+    let res = h
+        .app
+        .clone()
+        .oneshot(get("/donations/export.csv?year=abc", &user))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // Logged-out visitors are sent to log in.
+    let res = h
+        .app
+        .oneshot(
+            Request::get("/donations/export.csv")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(res.status(), StatusCode::OK);
+}
+
+mod receipts {
+    use super::*;
+    use common::harness_paperless;
+    use serde_json::json;
+    use wiremock::matchers::{header, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn paperless() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/documents/"))
+            .and(header("Authorization", "Token test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "count": 1,
+                "results": [{"id": 42, "title": "Receipt <b>Sponsors</b>", "created": "2026-09-26"}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/documents/42/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"id": 42, "title": "GitHub Sponsors receipt", "created": "2026-09-26"}),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/documents/99/"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn a_receipt_is_found_linked_and_unlinked() {
+        let server = paperless().await;
+        let h = harness_paperless(&server.uri()).await;
+        let admin = session_cookie(&h.key, &session(true));
+        let id = h
+            .store
+            .list_donations(Some("bigskysoftware-htmx"))
+            .await
+            .unwrap()[0]
+            .id;
+
+        // Every donation offers to find a receipt.
+        let html = body(
+            h.app
+                .clone()
+                .oneshot(get("/donations", &admin))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(html.contains(&format!("/donations/{id}/receipt")));
+
+        // Suggestions come from the date, and titles are escaped.
+        let res = h
+            .app
+            .clone()
+            .oneshot(get(&format!("/donations/{id}/receipt"), &admin))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let html = body(res).await;
+        assert!(html.contains("within a week"));
+        assert!(
+            html.contains("Receipt &#60;b&#62;Sponsors")
+                || html.contains("Receipt &lt;b&gt;Sponsors")
+        );
+        assert!(!html.contains("<b>Sponsors"));
+
+        // Linking needs the CSRF token, and the document has to exist.
+        let bad = [("_csrf", "wrong"), ("document", "42")];
+        let res = h
+            .app
+            .clone()
+            .oneshot(post(&format!("/donations/{id}/receipt"), &admin, &bad))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let missing = [("_csrf", "csrf-token"), ("document", "99")];
+        let res = h
+            .app
+            .clone()
+            .oneshot(post(&format!("/donations/{id}/receipt"), &admin, &missing))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let junk = [("_csrf", "csrf-token"), ("document", "../x")];
+        let res = h
+            .app
+            .clone()
+            .oneshot(post(&format!("/donations/{id}/receipt"), &admin, &junk))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let ok = [("_csrf", "csrf-token"), ("document", "42")];
+        let res = h
+            .app
+            .clone()
+            .oneshot(post(&format!("/donations/{id}/receipt"), &admin, &ok))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        // Linking twice keeps one link.
+        h.app
+            .clone()
+            .oneshot(post(&format!("/donations/{id}/receipt"), &admin, &ok))
+            .await
+            .unwrap();
+        assert_eq!(h.store.list_receipts().await.unwrap().len(), 1);
+
+        let html = body(
+            h.app
+                .clone()
+                .oneshot(get("/donations", &admin))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(html.contains("GitHub Sponsors receipt"));
+        assert!(html.contains(&format!("{}/documents/42/details", server.uri())));
+
+        let rid = h.store.list_receipts().await.unwrap()[0].id;
+        let res = h
+            .app
+            .clone()
+            .oneshot(post(
+                &format!("/receipts/{rid}/delete"),
+                &admin,
+                &[("_csrf", "csrf-token"), ("project", "")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert!(h.store.list_receipts().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn only_admins_link_receipts_and_a_search_can_name_what_to_find() {
+        let server = paperless().await;
+        let h = harness_paperless(&server.uri()).await;
+        let user = session_cookie(&h.key, &session(false));
+        let res = h
+            .app
+            .clone()
+            .oneshot(get("/donations/1/receipt", &user))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let res = h
+            .app
+            .clone()
+            .oneshot(post(
+                "/donations/1/receipt",
+                &user,
+                &[("_csrf", "csrf-token"), ("document", "42")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        Mock::given(method("GET"))
+            .and(path("/api/documents/"))
+            .and(query_param("query", "paperless"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"results": []})))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let admin = session_cookie(&h.key, &session(true));
+        let res = h
+            .app
+            .oneshot(get("/donations/1/receipt?q=paperless", &admin))
+            .await
+            .unwrap();
+        assert!(body(res).await.contains("Nothing matches"));
+    }
+
+    #[tokio::test]
+    async fn without_paperless_there_is_nothing_to_link() {
+        let h = harness(false).await;
+        let admin = session_cookie(&h.key, &session(true));
+        let html = body(
+            h.app
+                .clone()
+                .oneshot(get("/donations", &admin))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(!html.contains("Find receipt"));
+        let res = h
+            .app
+            .oneshot(get("/donations/1/receipt", &admin))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+}
+
+mod uploads {
+    use super::*;
+    use common::harness_s3;
+    use wiremock::matchers::{method, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// A multipart form with a CSRF token and, if given, a file.
+    fn multipart(csrf: &str, file: Option<(&str, &[u8])>) -> (String, Vec<u8>) {
+        let boundary = "XBOUNDARYX";
+        let mut body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"_csrf\"\r\n\r\n{csrf}\r\n"
+        )
+        .into_bytes();
+        if let Some((name, data)) = file {
+            body.extend(
+                format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{name}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+                )
+                .into_bytes(),
+            );
+            body.extend(data);
+            body.extend(b"\r\n");
+        }
+        body.extend(format!("--{boundary}--\r\n").into_bytes());
+        (format!("multipart/form-data; boundary={boundary}"), body)
+    }
+
+    fn upload_request(
+        id: i64,
+        cookie: &str,
+        csrf: &str,
+        file: Option<(&str, &[u8])>,
+    ) -> Request<Body> {
+        let (content_type, body) = multipart(csrf, file);
+        Request::post(format!("/donations/{id}/receipt/upload"))
+            .header(header::COOKIE, cookie)
+            .header(header::CONTENT_TYPE, content_type)
+            .header(header::ORIGIN, ORIGIN)
+            .body(Body::from(body))
+            .unwrap()
+    }
+
+    async fn first_donation(h: &common::Harness) -> i64 {
+        h.store
+            .list_donations(Some("bigskysoftware-htmx"))
+            .await
+            .unwrap()[0]
+            .id
+    }
+
+    #[tokio::test]
+    async fn a_pdf_is_uploaded_recorded_and_downloaded_through_a_presigned_link() {
+        let storage = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/receipts/receipts/\d{4}/\d+/[0-9a-f]{12}-my_receipt\.pdf$",
+            ))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&storage)
+            .await;
+        let h = harness_s3(&storage.uri()).await;
+        let admin = session_cookie(&h.key, &session(true));
+        let id = first_donation(&h).await;
+
+        let html = body(
+            h.app
+                .clone()
+                .oneshot(get(&format!("/donations/{id}/receipt"), &admin))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(html.contains("Upload a file"));
+
+        let pdf = b"%PDF-1.7 not really";
+        let res = h
+            .app
+            .clone()
+            .oneshot(upload_request(
+                id,
+                &admin,
+                "csrf-token",
+                Some(("../my receipt.pdf", pdf)),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER, "{}", body(res).await);
+        let receipts = h.store.list_receipts().await.unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].title, "my_receipt.pdf");
+        assert_eq!(receipts[0].content_type.as_deref(), Some("application/pdf"));
+
+        // Any logged-in user is sent to a short-lived link, not to the bucket itself.
+        let user = session_cookie(&h.key, &session(false));
+        let res = h
+            .app
+            .clone()
+            .oneshot(get(&format!("/receipts/{}/file", receipts[0].id), &user))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        let location = res.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(location.starts_with(&storage.uri()), "{location}");
+        assert!(location.contains("X-Amz-Signature="));
+        assert!(location.contains("X-Amz-Expires=300"));
+        assert_eq!(res.headers()[header::CACHE_CONTROL], "no-store");
+
+        // And the donation shows it, linking to Donarium rather than the bucket.
+        let html = body(
+            h.app
+                .clone()
+                .oneshot(get("/donations", &user))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(html.contains(&format!("/receipts/{}/file", receipts[0].id)));
+        assert!(!html.contains("X-Amz"));
+
+        // Logged-out visitors get nothing.
+        let res = h
+            .app
+            .oneshot(
+                Request::get(format!("/receipts/{}/file", receipts[0].id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let to = res.headers()[header::LOCATION].to_str().unwrap();
+        assert!(to.starts_with("/auth/login"), "{to}");
+    }
+
+    #[tokio::test]
+    async fn bad_uploads_are_refused_before_anything_is_stored() {
+        let storage = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&storage)
+            .await;
+        let h = harness_s3(&storage.uri()).await;
+        let admin = session_cookie(&h.key, &session(true));
+        let user = session_cookie(&h.key, &session(false));
+        let id = first_donation(&h).await;
+
+        for (cookie, csrf, file, status) in [
+            (
+                &admin,
+                "wrong",
+                Some(("a.pdf", &b"%PDF-1"[..])),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                &user,
+                "csrf-token",
+                Some(("a.pdf", &b"%PDF-1"[..])),
+                StatusCode::FORBIDDEN,
+            ),
+            (&admin, "csrf-token", None, StatusCode::UNPROCESSABLE_ENTITY),
+            (
+                &admin,
+                "csrf-token",
+                Some(("a.pdf", &b""[..])),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                &admin,
+                "csrf-token",
+                Some(("a.pdf", &b"<html>"[..])),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                &admin,
+                "csrf-token",
+                Some(("a.exe", &b"MZ\x90"[..])),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+        ] {
+            let res = h
+                .app
+                .clone()
+                .oneshot(upload_request(id, cookie, csrf, file))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), status, "{csrf} {file:?}");
+        }
+
+        // Bigger than the limit.
+        let big = vec![b'%'; 11 * 1024 * 1024];
+        let mut file = b"%PDF-".to_vec();
+        file.extend(big);
+        let res = h
+            .app
+            .clone()
+            .oneshot(upload_request(
+                id,
+                &admin,
+                "csrf-token",
+                Some(("big.pdf", &file)),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                res.status(),
+                StatusCode::PAYLOAD_TOO_LARGE
+                    | StatusCode::BAD_REQUEST
+                    | StatusCode::UNPROCESSABLE_ENTITY
+            ),
+            "{}",
+            res.status()
+        );
+        assert!(h.store.list_receipts().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_storage_failure_is_reported_and_nothing_is_recorded() {
+        let storage = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&storage)
+            .await;
+        let h = harness_s3(&storage.uri()).await;
+        let admin = session_cookie(&h.key, &session(true));
+        let id = first_donation(&h).await;
+        let res = h
+            .app
+            .oneshot(upload_request(
+                id,
+                &admin,
+                "csrf-token",
+                Some(("a.png", &b"\x89PNG\r\n\x1a\nxx"[..])),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+        assert!(body(res).await.contains("the storage answered"));
+        assert!(h.store.list_receipts().await.unwrap().is_empty());
+    }
 }
 
 mod funding_discovery {
