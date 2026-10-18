@@ -13,8 +13,9 @@ use sqlx::{Row, SqlitePool};
 
 use crate::fx::Rate;
 use crate::model::{
-    Actor, Conversion, Donation, DonationKind, Funding, FxSource, NewDonation, NewSource, Origin,
-    Project, ProjectUpdate, Provider, ScanMethod, Source, SourceUpdate, TRANSITIVE_FACTOR, Totals,
+    Actor, Conversion, Donation, DonationKind, Funding, FxSource, NewDonation, NewSource,
+    NewUpload, Origin, Project, ProjectUpdate, Provider, Receipt, ReceiptStore, ScanMethod, Source,
+    SourceUpdate, TRANSITIVE_FACTOR, Totals,
 };
 use crate::scan::manifests::{ImageUse, Skipped};
 use crate::scan::resolve::slug;
@@ -614,6 +615,118 @@ impl Store {
         self.get_donation(id).await?.ok_or(StoreError::NotFound)
     }
 
+    /// Points a donation at a Paperless document. Linking it twice is a no-op.
+    pub async fn link_receipt(
+        &self,
+        donation_id: i64,
+        reference: &str,
+        title: &str,
+        by: &Actor,
+        now: Timestamp,
+    ) -> Result<(), StoreError> {
+        let donation = self
+            .get_donation(donation_id)
+            .await?
+            .ok_or(StoreError::NotFound)?;
+        if donation.voided.is_some() {
+            return Err(StoreError::InUse(
+                "a voided donation cannot get a receipt".into(),
+            ));
+        }
+        sqlx::query(
+            "INSERT OR IGNORE INTO receipt (donation_id, store, reference, title, linked_by, linked_at)
+             VALUES (?, 'paperless', ?, ?, ?, ?)",
+        )
+        .bind(donation_id)
+        .bind(reference)
+        .bind(title)
+        .bind(&by.sub)
+        .bind(now.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Donations that count and have no receipt linked.
+    pub async fn donations_without_receipt(&self) -> Result<i64, StoreError> {
+        Ok(sqlx::query_scalar(
+            "SELECT COUNT(*) FROM donation d
+             WHERE d.voids_id IS NULL
+               AND NOT EXISTS (SELECT 1 FROM donation v WHERE v.voids_id = d.id)
+               AND NOT EXISTS (SELECT 1 FROM receipt r WHERE r.donation_id = d.id)",
+        )
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    pub async fn unlink_receipt(&self, id: i64) -> Result<(), StoreError> {
+        let done = sqlx::query("DELETE FROM receipt WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        if done.rows_affected() == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Records a file kept in the S3 bucket as a donation's receipt.
+    pub async fn add_upload(
+        &self,
+        donation_id: i64,
+        upload: &NewUpload,
+        by: &Actor,
+        now: Timestamp,
+    ) -> Result<(), StoreError> {
+        let donation = self
+            .get_donation(donation_id)
+            .await?
+            .ok_or(StoreError::NotFound)?;
+        if donation.voided.is_some() {
+            return Err(StoreError::InUse(
+                "a voided donation cannot get a receipt".into(),
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO receipt (donation_id, store, reference, title, content_type, size_bytes, sha256, linked_by, linked_at)
+             VALUES (?, 's3', ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(donation_id)
+        .bind(&upload.key)
+        .bind(&upload.filename)
+        .bind(&upload.content_type)
+        .bind(upload.size)
+        .bind(&upload.sha256)
+        .bind(&by.sub)
+        .bind(now.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    const RECEIPT_SELECT: &str =
+        "SELECT id, donation_id, store, reference, title, content_type, linked_by FROM receipt";
+
+    /// Every linked receipt, for showing next to the donations.
+    pub async fn list_receipts(&self) -> Result<Vec<Receipt>, StoreError> {
+        sqlx::query(&format!("{} ORDER BY id", Self::RECEIPT_SELECT))
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(receipt_from_row)
+            .collect()
+    }
+
+    pub async fn get_receipt(&self, id: i64) -> Result<Option<Receipt>, StoreError> {
+        sqlx::query(&format!("{} WHERE id = ?", Self::RECEIPT_SELECT))
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .map(receipt_from_row)
+            .transpose()
+    }
+
     /// Cancels a donation with a void entry. The donation stays in the history,
     /// marked as voided, and stops counting.
     pub async fn void_donation(
@@ -841,6 +954,46 @@ impl Store {
             };
         }
         Ok(())
+    }
+
+    /// Which sources use a project, and how much each contributes to its score
+    /// (a disabled source contributes nothing).
+    pub async fn usage_breakdown(&self, name: &str) -> Result<Vec<UsageEntry>, StoreError> {
+        sqlx::query(
+            "SELECT s.id AS source_id, s.provider, s.repo, s.enabled, s.weight, u.via, u.kind
+               FROM usage u
+               JOIN source s ON s.id = u.source_id
+               JOIN project p ON p.id = u.project_id
+              WHERE p.name = ?
+              ORDER BY s.repo COLLATE NOCASE, u.via",
+        )
+        .bind(name)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|r| {
+            let provider: String = r.try_get("provider")?;
+            let kind: String = r.try_get("kind")?;
+            let enabled: bool = r.try_get("enabled")?;
+            let weight: f64 = r.try_get("weight")?;
+            let factor = if kind == "direct" {
+                1.0
+            } else {
+                TRANSITIVE_FACTOR
+            };
+            Ok(UsageEntry {
+                source_id: r.try_get("source_id")?,
+                provider: Provider::parse(&provider)
+                    .ok_or_else(|| corrupt("provider", &provider))?,
+                repo: r.try_get("repo")?,
+                enabled,
+                weight,
+                via: r.try_get("via")?,
+                direct: kind == "direct",
+                contribution: if enabled { weight * factor } else { 0.0 },
+            })
+        })
+        .collect()
     }
 
     // --- projects ---
@@ -1166,6 +1319,21 @@ async fn upsert_project(
     .await?)
 }
 
+/// One source's use of a project.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UsageEntry {
+    pub source_id: i64,
+    pub provider: Provider,
+    pub repo: String,
+    pub enabled: bool,
+    pub weight: f64,
+    /// Which scan found it: `images` or `dependencies`.
+    pub via: String,
+    pub direct: bool,
+    /// What it adds to the project's usage score.
+    pub contribution: f64,
+}
+
 /// A donation waiting for its amount in the base currency.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingConversion {
@@ -1239,6 +1407,27 @@ fn corrupt(what: &str, value: &str) -> StoreError {
 fn timestamp(row: &SqliteRow, column: &str) -> Result<Timestamp, StoreError> {
     let raw: String = row.try_get(column)?;
     raw.parse().map_err(|_| corrupt(column, &raw))
+}
+
+fn receipt_from_row(row: &SqliteRow) -> Result<Receipt, StoreError> {
+    let store: String = row.try_get("store")?;
+    Ok(Receipt {
+        id: row.try_get("id")?,
+        donation_id: row.try_get("donation_id")?,
+        store: match store.as_str() {
+            "paperless" => ReceiptStore::Paperless,
+            "s3" => ReceiptStore::S3,
+            other => {
+                return Err(StoreError::Corrupt(format!(
+                    "unknown receipt store {other:?}"
+                )));
+            }
+        },
+        reference: row.try_get("reference")?,
+        title: row.try_get("title")?,
+        content_type: row.try_get("content_type")?,
+        linked_by: row.try_get("linked_by")?,
+    })
 }
 
 fn donation_from_row(row: &SqliteRow) -> Result<Donation, StoreError> {
@@ -1508,6 +1697,70 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(left, 0);
+    }
+
+    #[tokio::test]
+    async fn usage_breakdown_lists_each_source_with_its_contribution() {
+        let store = Store::memory().await.unwrap();
+        let heavy = store
+            .create_source(&new_source("me/heavy"), &actor(), now())
+            .await
+            .unwrap();
+        let mut light = new_source("me/light");
+        light.weight = 0.4;
+        let light = store.create_source(&light, &actor(), now()).await.unwrap();
+        sqlx::query("INSERT INTO project (id, name, repo, first_seen_at, last_seen_at) VALUES (1, 'a-b', 'github.com/a/b', 'x', 'x')")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        for (source, via, kind) in [
+            (heavy.id, "images", "direct"),
+            (heavy.id, "dependencies", "transitive"),
+            (light.id, "dependencies", "transitive"),
+        ] {
+            sqlx::query("INSERT INTO usage (source_id, project_id, via, kind) VALUES (?, 1, ?, ?)")
+                .bind(source)
+                .bind(via)
+                .bind(kind)
+                .execute(store.pool())
+                .await
+                .unwrap();
+        }
+        let usage = store.usage_breakdown("a-b").await.unwrap();
+        assert_eq!(usage.len(), 3);
+        assert_eq!(usage[0].repo, "me/heavy");
+        assert!(
+            usage
+                .iter()
+                .any(|u| u.via == "images" && u.direct && u.contribution == 1.0)
+        );
+        assert!(
+            usage
+                .iter()
+                .any(|u| u.repo == "me/light" && !u.direct && (u.contribution - 0.1).abs() < 1e-9)
+        );
+        // A disabled source contributes nothing, but is still listed.
+        store
+            .update_source(
+                light.id,
+                &SourceUpdate {
+                    weight: 0.4,
+                    scan_method: ScanMethod::Auto,
+                    enabled: false,
+                },
+                &actor(),
+                now(),
+            )
+            .await
+            .unwrap();
+        let usage = store.usage_breakdown("a-b").await.unwrap();
+        assert!(
+            usage
+                .iter()
+                .filter(|u| u.repo == "me/light")
+                .all(|u| !u.enabled && u.contribution == 0.0)
+        );
+        assert!(store.usage_breakdown("nope").await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1915,6 +2168,99 @@ mod tests {
             .execute(store.pool())
             .await;
         assert!(other.is_err());
+    }
+
+    #[tokio::test]
+    async fn receipts_are_links_that_can_be_removed() {
+        let store = store_with_project().await;
+        let d = store
+            .record_donation(
+                &donation("tokio-rs-tokio", 1000, "EUR", date(2026, 3, 1), Some(1000)),
+                &actor(),
+                now(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.donations_without_receipt().await.unwrap(), 1);
+        store
+            .link_receipt(d.id, "42", "Receipt", &actor(), now())
+            .await
+            .unwrap();
+        // The same document twice is one link.
+        store
+            .link_receipt(d.id, "42", "Receipt", &actor(), now())
+            .await
+            .unwrap();
+        let all = store.list_receipts().await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(
+            (all[0].donation_id, all[0].title.as_str()),
+            (d.id, "Receipt")
+        );
+        assert_eq!(store.donations_without_receipt().await.unwrap(), 0);
+
+        // The donation itself stays untouched, and unlinking brings it back.
+        store.unlink_receipt(all[0].id).await.unwrap();
+        assert!(matches!(
+            store.unlink_receipt(all[0].id).await,
+            Err(StoreError::NotFound)
+        ));
+        assert_eq!(store.donations_without_receipt().await.unwrap(), 1);
+
+        // A voided donation takes no receipt, and does not count as missing one.
+        store.void_donation(d.id, &actor(), now()).await.unwrap();
+        assert!(matches!(
+            store.link_receipt(d.id, "43", "", &actor(), now()).await,
+            Err(StoreError::InUse(_))
+        ));
+        assert_eq!(store.donations_without_receipt().await.unwrap(), 0);
+        assert!(matches!(
+            store.link_receipt(9999, "1", "", &actor(), now()).await,
+            Err(StoreError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn uploaded_files_are_receipts_too() {
+        let store = store_with_project().await;
+        let d = store
+            .record_donation(
+                &donation("tokio-rs-tokio", 1000, "EUR", date(2026, 3, 1), Some(1000)),
+                &actor(),
+                now(),
+            )
+            .await
+            .unwrap();
+        store
+            .link_receipt(d.id, "42", "From Paperless", &actor(), now())
+            .await
+            .unwrap();
+        let upload = NewUpload {
+            key: "receipts/2026/1/abc-r.pdf".into(),
+            filename: "r.pdf".into(),
+            content_type: "application/pdf".into(),
+            size: 12,
+            sha256: "abc".into(),
+        };
+        store
+            .add_upload(d.id, &upload, &actor(), now())
+            .await
+            .unwrap();
+        // The same object cannot be recorded twice.
+        assert!(
+            store
+                .add_upload(d.id, &upload, &actor(), now())
+                .await
+                .is_err()
+        );
+        let all = store.list_receipts().await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].store, ReceiptStore::Paperless);
+        let file = store.get_receipt(all[1].id).await.unwrap().unwrap();
+        assert_eq!(file.store, ReceiptStore::S3);
+        assert_eq!(file.reference, "receipts/2026/1/abc-r.pdf");
+        assert_eq!(file.content_type.as_deref(), Some("application/pdf"));
+        assert!(store.get_receipt(999).await.unwrap().is_none());
     }
 
     #[tokio::test]

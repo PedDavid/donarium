@@ -37,6 +37,8 @@ fn notice(code: &str) -> &'static str {
         }
         "rated" => "Rate saved. The donation now counts in the totals.",
         "voided" => "Donation voided. It stays in the history, marked as voided.",
+        "receipt-linked" => "Receipt linked.",
+        "receipt-unlinked" => "Receipt unlinked. The document is still in Paperless.",
         _ => "",
     }
 }
@@ -187,12 +189,13 @@ async fn render(
     let store = &ctx.state.inner.store;
     let base = ctx.state.inner.cfg.base_currency.clone();
     let filter = (!project.is_empty()).then_some(project);
-    let donations = store
+    let mut donations: Vec<DonationRow> = store
         .list_donations(filter)
         .await?
         .iter()
         .map(|d| DonationRow::new(d, &base))
         .collect();
+    super::receipts::attach(ctx.state, &mut donations).await?;
     let projects = store
         .list_projects()
         .await?

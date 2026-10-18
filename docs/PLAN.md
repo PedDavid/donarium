@@ -227,7 +227,7 @@ relative to how much you use them?*
 ```
 priority = usage_share × staleness
 usage_share = usage_score / Σ usage_score        (0..1)
-staleness   = 1 + days_since_last_donation / 365   (capped, never donated = max)
+staleness   = 1 + min(days_since_last_donation, 1095) / 365   (never donated = 4.0, the cap)
 ```
 
 - Projects with no way to donate and `ignore: true` projects are excluded from
@@ -241,7 +241,7 @@ The **detail view** shows the full picture behind the number:
 - Usage: which of your sources use it, direct or transitive, and the score.
 - Time: last donation, and a timeline of all donations.
 - Fair share: total donated vs usage share, as a "target vs actual" bar
-  (`target = usage_share × total_ever_donated`).
+  (`fair share = usage_share × total donated`, ignored projects excluded).
 - Funding: discovered channels with links, and which are not available.
 - Need/health: maintainers, last release and commit, whether the project is
   company-backed (from the GitHub API and ecosyste.ms). Informational only
@@ -343,6 +343,15 @@ pub trait ReceiptStore: Send + Sync {
     linked to Paperless's own UI, depending on `--paperless-open=proxy|link`.
     The default is `link`, so Donarium never serves documents that Paperless
     already protects.
+- **Built so far:** Paperless link-only. `--paperless-url` and
+  `--paperless-token-file` turn it on; a donation then offers *Find receipt*,
+  which lists documents dated within a week of it (or searches by text), checks
+  the chosen document exists, and stores its id and title in `receipt`. The
+  Paperless token is sent only to the configured server and redirects are not
+  followed. Documents open in Paperless's own UI (`link` mode).
+- **S3 built:** upload on the same page (`--s3-*` flags, Helm `s3.*`), type
+  checked by magic bytes, 10 MB cap, sanitised names, presigned five-minute
+  downloads behind login. Objects are kept when a receipt is unlinked.
 - **S3 (upload).** For receipts that exist nowhere else (a PDF from a donation
   page). Uploaded to `<bucket>/<year>/<donation-id>/<filename>` with SSE and a
   SHA-256, served through short-lived presigned URLs after an OIDC check.
@@ -366,9 +375,9 @@ pub trait ReceiptStore: Send + Sync {
 | `donarium_donations` | Number of donations that count | yes |
 | `donarium_donations_without_conversion` | Donations still missing a base amount | yes |
 | `donarium_fx_requests_total{result}` | Rate lookups: ok, unsupported, rate_limited, error | yes |
-| `donarium_project_priority{project}` | Ranking value (top N only, to bound cardinality) | with ranking |
-| `donarium_donations_without_receipt` | Receipt hygiene | with receipts |
-| `donarium_receipt_store_healthy{store}` | | with receipts |
+| `donarium_project_priority{project}` | Ranking value (top N only, to bound cardinality) | yes |
+| `donarium_donations_without_receipt` | Receipt hygiene | yes |
+| `donarium_receipt_store_healthy{store}` | | with S3 |
 
 Shipped `PrometheusRule`s: scans stale, receipt store unhealthy, donations
 without receipts, and an optional "no donation in N days" reminder.
