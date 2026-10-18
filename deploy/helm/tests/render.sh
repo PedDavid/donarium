@@ -105,6 +105,22 @@ env=$(yq 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env'
 [[ $(yq 'select(.kind == "Deployment") | .spec.template.spec.volumes[] | select(.name == "registry-credentials") | .secret.secretName' <<<"$out") == regcred ]] || fail "the registry Secret is not mounted"
 [[ -z $(render | yq 'select(.kind == "Deployment") | .spec.template.spec.volumes[] | select(.name == "registry-credentials")') ]] || fail "registry credentials mounted without a Secret"
 
+# Alerts and the dashboard are off unless asked for.
+out=$(render)
+[[ -z $(yq 'select(.kind == "PrometheusRule" or .metadata.name == "donarium-dashboard")' <<<"$out") ]] \
+  || fail "alerts or dashboard rendered by default"
+out=$(render --set prometheusRule.enabled=true --set grafanaDashboard.enabled=true)
+rule=$(yq 'select(.kind == "PrometheusRule")' <<<"$out")
+[[ $(yq '.spec.groups[0].rules | length' <<<"$rule") == 5 ]] || fail "expected 5 alerts without the reminder"
+grep -q 'time() - donarium_source_last_scan_timestamp_seconds > 259200' <<<"$rule" || fail "the stale scan threshold is not 72 hours"
+grep -q 'labels.repo' <<<"$rule" || fail "the alert templates lost their label references"
+out=$(render --set prometheusRule.enabled=true --set prometheusRule.donationReminderDays=90)
+[[ $(yq 'select(.kind == "PrometheusRule") | .spec.groups[0].rules | length' <<<"$out") == 6 ]] || fail "the reminder alert is missing"
+out=$(render --set grafanaDashboard.enabled=true)
+cm=$(yq 'select(.kind == "ConfigMap" and .metadata.name == "donarium-dashboard")' <<<"$out")
+[[ $(yq '.metadata.labels.grafana_dashboard' <<<"$cm") == 1 ]] || fail "the dashboard has no sidecar label"
+[[ $(yq '.data."donarium.json"' <<<"$cm" | yq -p=json '.title') == Donarium ]] || fail "the dashboard JSON does not parse"
+
 # The base currency reaches the container, EUR unless set.
 env=$(render | yq 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env')
 [[ $(yq '.[] | select(.name == "DONARIUM_BASE_CURRENCY") | .value' <<<"$env") == EUR ]] || fail "the base currency default is not EUR"

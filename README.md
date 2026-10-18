@@ -136,6 +136,17 @@ images it runs:
 `cargo test --test live -- --ignored --nocapture` checks the registry and GitLab
 code against the real services.
 
+## Alerts and dashboard
+
+The Helm chart can install a `PrometheusRule` (`prometheusRule.enabled`) and a
+Grafana dashboard ConfigMap for the Grafana sidecar (`grafanaDashboard.enabled`).
+The alerts: Donarium not reporting, a source whose last scan failed or is older
+than `prometheusRule.scanStaleAfterHours`, donations still waiting for an
+exchange rate for a day, rate lookups failing, and, if
+`prometheusRule.donationReminderDays` is set, a reminder when you have not
+donated for that long. They were checked by rendering the chart, not against a
+running Prometheus.
+
 ## Development
 
 - **Backend:** Rust with axum. Pages are rendered on the server with askama.
