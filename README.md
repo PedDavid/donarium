@@ -68,6 +68,15 @@ Only the document's id and title are kept: nothing is copied, and Paperless
 still decides who can open the file. Unlinking never touches the document.
 `donarium_donations_without_receipt` counts the donations that have none.
 
+For a receipt that exists nowhere else, set `--s3-endpoint`, `--s3-bucket`,
+`--s3-access-key-file` and `--s3-secret-key-file` (and `--s3-region`, `--s3-sse`)
+and the same page offers an upload: a PDF, PNG or JPEG of up to 10 MB, checked by
+its content, kept as `receipts/<year>/<donation>/<hash>-<name>`. Logged-in users
+open it through a five-minute presigned link. Unlinking a receipt forgets it but
+leaves the object in the bucket. Requests are signed by Donarium itself (SigV4,
+checked against AWS's published example) and use path-style addressing, so
+MinIO and similar services work; it has not been run against a real bucket.
+
 ## Scanning
 
 A source with the scan method `images` (or `auto`) is scanned for the container

@@ -8,6 +8,7 @@ pub mod model;
 pub mod money;
 pub mod ranking;
 pub mod receipts;
+pub mod s3;
 pub mod scan;
 pub mod store;
 pub mod validation;
