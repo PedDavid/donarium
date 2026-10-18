@@ -2,6 +2,8 @@
 //! discover them; admins can also add one by hand, set how much it counts,
 //! ignore it, and say how to donate to it.
 
+use std::collections::HashMap;
+
 use askama::Template;
 use axum::Form;
 use axum::extract::{Path, Query, State};
@@ -12,11 +14,14 @@ use serde::Deserialize;
 use tracing::info;
 
 use super::auth::{Admin, User};
-use super::pages::{Ctx, Feedback, Filters, Layout, is_htmx, rows};
-use super::views::{DonationRow, FundingLink, ProjectRow, fmt_money, fmt_weight};
+use super::pages::{Ctx, Feedback, Filters, Layout, is_htmx};
+use super::views::{
+    DonationRow, FundingLink, ProjectRow, StandingView, UsageRow, fmt_money, fmt_weight,
+};
 use super::{AppError, AppState};
 use crate::funding;
-use crate::model::ProjectUpdate;
+use crate::model::{Project, ProjectUpdate};
+use crate::ranking::{Ranking, rank};
 use crate::scan::resolve::parse_project_repo;
 use crate::store::StoreError;
 use crate::validation::parse_usage;
@@ -29,6 +34,8 @@ fn notice(code: &str) -> &'static str {
         "deleted" => "Project deleted.",
         "funding-added" => "Way to donate added.",
         "funding-removed" => "Way to donate removed.",
+        "funding-found" => "Looked at the project's FUNDING.yml: its ways to donate are listed.",
+        "funding-none" => "The project declares no ways to donate in a FUNDING.yml.",
         _ => "",
     }
 }
@@ -37,6 +44,8 @@ fn notice(code: &str) -> &'static str {
 pub struct IndexQuery {
     #[serde(default)]
     q: String,
+    #[serde(default)]
+    sort: String,
     #[serde(default)]
     notice: String,
 }
@@ -54,6 +63,8 @@ pub struct AddValues {
 struct IndexPage {
     layout: Layout,
     rows: Vec<ProjectRow>,
+    /// Not ignored, but nothing to donate through yet.
+    no_link: Vec<ProjectRow>,
     ignored: Vec<ProjectRow>,
     total: usize,
     filters: Filters,
@@ -76,10 +87,20 @@ pub async fn index(
     headers: HeaderMap,
     Query(q): Query<IndexQuery>,
 ) -> Result<Response, AppError> {
-    let filters = Filters { q: q.q };
+    let filters = Filters {
+        q: q.q,
+        sort: q.sort,
+    };
     if is_htmx(&headers, "projects-table") {
-        let (rows, total) = active(&state, &filters.q).await?;
-        return Ok(Html(ProjectsTable { rows, total }.render()?).into_response());
+        let s = sections(&state, &filters.q, &filters.sort).await?;
+        return Ok(Html(
+            ProjectsTable {
+                rows: s.ranked,
+                total: s.total,
+            }
+            .render()?,
+        )
+        .into_response());
     }
     let ctx = Ctx {
         state: &state,
@@ -98,10 +119,70 @@ pub async fn index(
     .await
 }
 
-/// Projects that take part in the ranking, and how many projects there are.
-async fn active(state: &AppState, q: &str) -> Result<(Vec<ProjectRow>, usize), AppError> {
-    let (all, total) = rows(state, q).await?;
-    Ok((all.into_iter().filter(|r| !r.ignored).collect(), total))
+/// The projects as the list shows them.
+struct Sections {
+    /// In the ranking and with a way to donate, in the order asked for.
+    ranked: Vec<ProjectRow>,
+    /// In the ranking, but with nothing to donate through yet.
+    no_link: Vec<ProjectRow>,
+    ignored: Vec<ProjectRow>,
+    /// All projects, before the filter.
+    total: usize,
+}
+
+/// Ranks all projects, then keeps the ones matching `q`. The ranking is of
+/// everything: filtering never changes a project's position.
+async fn sections(state: &AppState, q: &str, sort: &str) -> Result<Sections, AppError> {
+    let now = state.now();
+    let projects = state.inner.store.list_projects().await?;
+    let ranking = rank(&projects, now.to_zoned(jiff::tz::TimeZone::UTC).date());
+    let by_name: HashMap<&str, &Project> = projects.iter().map(|p| (p.name.as_str(), p)).collect();
+
+    let mut order: Vec<_> = ranking.projects.iter().collect();
+    match sort {
+        "name" => order.sort_by(|a, b| a.name.cmp(&b.name)),
+        "usage" => order.sort_by(|a, b| {
+            b.usage_score
+                .total_cmp(&a.usage_score)
+                .then_with(|| a.name.cmp(&b.name))
+        }),
+        // Waiting longest first; never donated counts as the longest.
+        "last" => order.sort_by(|a, b| {
+            b.days_since_donation
+                .unwrap_or(i64::MAX)
+                .cmp(&a.days_since_donation.unwrap_or(i64::MAX))
+                .then_with(|| a.name.cmp(&b.name))
+        }),
+        _ => {}
+    }
+
+    let (mut ranked, mut no_link) = (Vec::new(), Vec::new());
+    for r in order {
+        let Some(project) = by_name.get(r.name.as_str()) else {
+            continue;
+        };
+        let row = ProjectRow::new(project, now).with_ranking(r, ranking.position(&r.name));
+        if !(q.is_empty() || row.matches(q)) {
+            continue;
+        }
+        if r.can_donate {
+            ranked.push(row);
+        } else {
+            no_link.push(row);
+        }
+    }
+    let ignored = projects
+        .iter()
+        .filter(|p| p.ignored)
+        .map(|p| ProjectRow::new(p, now))
+        .filter(|row| q.is_empty() || row.matches(q))
+        .collect();
+    Ok(Sections {
+        ranked,
+        no_link,
+        ignored,
+        total: projects.len(),
+    })
 }
 
 async fn render_index(
@@ -110,13 +191,13 @@ async fn render_index(
     form: AddValues,
     feedback: Feedback,
 ) -> Result<Response, AppError> {
-    let (all, total) = rows(ctx.state, &filters.q).await?;
-    let (ignored, rows): (Vec<_>, Vec<_>) = all.into_iter().partition(|r| r.ignored);
+    let s = sections(ctx.state, &filters.q, &filters.sort).await?;
     let page = IndexPage {
         layout: Layout::new(ctx.state, ctx.session, ctx.jar, "Projects"),
-        rows,
-        ignored,
-        total,
+        rows: s.ranked,
+        no_link: s.no_link,
+        ignored: s.ignored,
+        total: s.total,
         filters,
         notice: feedback.notice,
         error: feedback.error,
@@ -233,6 +314,8 @@ struct DetailPage {
     layout: Layout,
     project: ProjectRow,
     links: Vec<FundingLink>,
+    /// The project's FUNDING.yml can be looked up (a GitHub project, and GitHub is reachable).
+    can_discover: bool,
     platforms: Vec<(&'static str, &'static str, bool)>,
     notice: &'static str,
     error: String,
@@ -245,6 +328,9 @@ struct DetailPage {
     filter: String,
     /// What this project's donations add up to, in the base currency.
     donated: String,
+    /// Where it stands: `None` for an ignored project.
+    standing: Option<StandingView>,
+    usage: Vec<UsageRow>,
 }
 
 pub async fn detail(
@@ -269,13 +355,26 @@ async fn render_detail(
     funding_values: Option<FundingValues>,
     feedback: Feedback,
 ) -> Result<Response, AppError> {
-    let project = ctx
+    let all = ctx.state.inner.store.list_projects().await?;
+    let ranking = rank(
+        &all,
+        ctx.state.now().to_zoned(jiff::tz::TimeZone::UTC).date(),
+    );
+    let project = all
+        .iter()
+        .find(|p| p.name == name)
+        .cloned()
+        .ok_or_else(|| AppError::NotFound(format!("no project named {name:?}")))?;
+    let standing = standing_of(&ranking, name, &ctx.state.inner.cfg.base_currency);
+    let usage = ctx
         .state
         .inner
         .store
-        .get_project(name)
+        .usage_breakdown(name)
         .await?
-        .ok_or_else(|| AppError::NotFound(format!("no project named {name:?}")))?;
+        .iter()
+        .map(UsageRow::new)
+        .collect();
     let settings = settings.unwrap_or_else(|| SettingsValues {
         usage: fmt_weight(project.manual_usage),
         ignore: project.ignored,
@@ -290,7 +389,7 @@ async fn render_detail(
         .map(|(id, label)| (*id, *label, *id == funding_values.platform))
         .collect();
     let base = &ctx.state.inner.cfg.base_currency;
-    let donations = ctx
+    let mut donations: Vec<DonationRow> = ctx
         .state
         .inner
         .store
@@ -299,6 +398,7 @@ async fn render_detail(
         .iter()
         .map(|d| DonationRow::new(d, base))
         .collect();
+    super::receipts::attach(ctx.state, &mut donations).await?;
     let donated = fmt_money(project.donated_base_minor, base);
     let page = DetailPage {
         layout: Layout::new(ctx.state, ctx.session, ctx.jar, project.name.clone()),
@@ -306,7 +406,11 @@ async fn render_detail(
         show_project: false,
         filter: project.name.clone(),
         donated,
+        standing,
+        usage,
         links: project.funding.iter().map(FundingLink::new).collect(),
+        can_discover: ctx.state.inner.scanner.can_find_funding()
+            && project.repo.starts_with("github.com/"),
         project: ProjectRow::new(&project, ctx.state.now()),
         platforms,
         notice: feedback.notice,
@@ -430,6 +534,48 @@ pub async fn add_funding(
     }
 }
 
+pub async fn discover_funding(
+    State(state): State<AppState>,
+    Admin(session): Admin,
+    jar: CookieJar,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Form(form): Form<CsrfOnly>,
+) -> Result<Response, AppError> {
+    session.check_csrf(&headers, form.csrf.as_deref())?;
+    let ctx = Ctx {
+        state: &state,
+        session: &session,
+        jar: &jar,
+    };
+    let project = state
+        .inner
+        .store
+        .get_project(&name)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("no project named {name:?}")))?;
+    match state
+        .inner
+        .scanner
+        .discover_funding(&name, &project.repo)
+        .await
+    {
+        Ok(n) => {
+            info!(actor = %session.sub, project = %name, found = n, "funding looked up");
+            let code = if n > 0 {
+                "funding-found"
+            } else {
+                "funding-none"
+            };
+            Ok(Redirect::to(&format!("/projects/{name}?notice={code}")).into_response())
+        }
+        Err(e) => {
+            let rejected = Feedback::rejected(e.to_string(), StatusCode::BAD_GATEWAY);
+            render_detail(&ctx, &name, None, None, rejected).await
+        }
+    }
+}
+
 pub async fn remove_funding(
     State(state): State<AppState>,
     Admin(session): Admin,
@@ -478,4 +624,10 @@ pub async fn delete(
         }
         Err(e) => Err(e.into()),
     }
+}
+
+fn standing_of(ranking: &Ranking, name: &str, base: &str) -> Option<StandingView> {
+    let r = ranking.get(name)?;
+    let of = ranking.projects.iter().filter(|r| r.can_donate).count();
+    Some(StandingView::new(r, ranking.position(name), of, base))
 }

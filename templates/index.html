@@ -11,21 +11,41 @@
   <div class="flex flex-wrap items-end justify-between gap-4">
     <div>
       <h1 class="text-2xl font-semibold tracking-tight">Projects</h1>
-      <p class="text-muted-foreground text-sm">The open-source projects you depend on or want to support. Scans of your sources find them; {% if layout.admin %}you can also add one yourself below{% else %}an admin can also add one by hand{% endif %}.</p>
+      <p class="text-muted-foreground text-sm">Who to support next: projects ranked by how much you use them, raised the longer it has been since you last donated to them. Scans of your sources find them; {% if layout.admin %}you can also add one yourself below{% else %}an admin can also add one by hand{% endif %}.</p>
     </div>
   </div>
 
   <form id="filters" class="flex flex-col gap-3" hx-get="/" hx-target="#projects-table" hx-push-url="true"
         hx-trigger="input changed delay:250ms from:#q, change">
-    <div class="relative grow sm:max-w-xs">
-      <span class="pointer-events-none absolute start-2.5 top-1/2 -translate-y-1/2 text-muted-foreground [&>svg]:size-4">{% include "icons/search.svg" %}</span>
-      <input id="q" class="input ps-8" type="search" name="q" value="{{ filters.q }}" placeholder="Filter by name or repository…" aria-label="Filter">
+    <div class="flex flex-wrap gap-2">
+      <div class="relative grow sm:max-w-xs">
+        <span class="pointer-events-none absolute start-2.5 top-1/2 -translate-y-1/2 text-muted-foreground [&>svg]:size-4">{% include "icons/search.svg" %}</span>
+        <input id="q" class="input ps-8" type="search" name="q" value="{{ filters.q }}" placeholder="Filter by name or repository…" aria-label="Filter">
+      </div>
+      <select class="select" name="sort" aria-label="Sort">
+        <option value="" {% if filters.sort.is_empty() %}selected{% endif %}>Highest priority first</option>
+        <option value="usage" {% if filters.sort == "usage" %}selected{% endif %}>Most used first</option>
+        <option value="last" {% if filters.sort == "last" %}selected{% endif %}>Longest since a donation first</option>
+        <option value="name" {% if filters.sort == "name" %}selected{% endif %}>Name</option>
+      </select>
     </div>
   </form>
 
   <div id="projects-table">
     {% include "partials/projects_table.html" %}
   </div>
+
+  {% if !no_link.is_empty() %}
+  <details class="w-full rounded-lg border p-4">
+    <summary class="cursor-pointer text-sm font-medium">{{ no_link.len() }} project(s) with no way to donate yet</summary>
+    <p class="mt-2 text-sm text-muted-foreground">Not in the list above because there is nothing to donate through. {% if layout.admin %}Open one and add a way to donate.{% endif %}</p>
+    <ul class="mt-3 flex flex-col gap-1 text-sm">
+      {% for row in no_link %}
+      <li><a href="/projects/{{ row.name }}" class="hover:underline">{{ row.name }}</a>{% if row.manual %} <span class="badge" data-variant="secondary">added by hand</span>{% endif %} <span class="text-muted-foreground">{{ row.repo }} · {{ row.share }} of usage</span></li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% endif %}
 
   {% if !ignored.is_empty() %}
   <details class="w-full rounded-lg border p-4">

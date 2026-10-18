@@ -59,6 +59,46 @@ donation keeps what was paid, exactly, in the currency it was paid in.
     truth; it is not tax advice.
 - `--step-up-max-age` makes recording and voiding require a recent login.
 
+A subscription (GitHub Sponsors, Open Collective, …) is set up once as a
+*recurring donation* on the donations page: an amount, how often (monthly or
+yearly) and the first date. Each date it falls on records an ordinary donation,
+converted at that day's rate, when it comes due (checked hourly, and at once when
+it is set up). A plan that began long ago catches up 36 donations per run. Ending
+a plan stops new donations and keeps what was recorded; plans are never deleted.
+
+Every donation that counts can be downloaded as a CSV file
+(`/donations/export.csv`, or `?year=2026` for a tax year) with the amount as
+paid, the amount in the base currency, the rate used and where it came from.
+Voided donations are left out.
+
+## Finding how to donate
+
+For GitHub projects Donarium reads the `.github/FUNDING.yml` the project (or its
+account's `.github` repository) publishes, and lists what it declares: GitHub
+Sponsors, Open Collective, Ko-fi, Liberapay, Patreon, thanks.dev, `custom` links
+(https only) and a few link-only platforms. An admin can ask for it on a
+project's page; after each scheduled scan, up to 20 projects not checked for a
+week are looked up too, stopping when GitHub rate limits. What is found is
+replaced on each lookup; what an admin added by hand is never touched.
+
+## Receipts
+
+With `--paperless-url` and `--paperless-token-file` (an API token), each
+donation gets a *Find receipt* button. It lists the Paperless documents dated
+within a week of the donation, or searches by text, and links the one you pick.
+Only the document's id and title are kept: nothing is copied, and Paperless
+still decides who can open the file. Unlinking never touches the document.
+`donarium_donations_without_receipt` counts the donations that have none.
+
+For a receipt that exists nowhere else, set `--s3-endpoint`, `--s3-bucket`,
+`--s3-access-key-file` and `--s3-secret-key-file` (and `--s3-region`, `--s3-sse`)
+and the same page offers an upload: a PDF, PNG or JPEG of up to 10 MB, checked by
+its content, kept as `receipts/<year>/<donation>/<hash>-<name>`. Logged-in users
+open it through a five-minute presigned link. Unlinking a receipt forgets it but
+leaves the object in the bucket. Requests are signed by Donarium itself (SigV4,
+checked against AWS's published example) and use path-style addressing, so
+MinIO and similar services work; it has not been run against a real bucket.
+
 ## Scanning
 
 A source with the scan method `images` (or `auto`) is scanned for the container
@@ -85,8 +125,13 @@ images it runs:
 - **Schedule:** `--scan-interval` (default `24h`, `0s` for never) and "Scan now"
   on the source's page.
 - **Registries:** only well-known public ones are contacted
-  (`--registry-allow` adds more), anonymously. Docker Hub limits anonymous pulls,
-  so the first scan of many images may leave some for the next one.
+  (`--registry-allow` adds more), anonymously by default. Docker Hub limits
+  anonymous pulls, so the first scan of many images may leave some for the next
+  one. To lift that, give `--registry-credentials-file` a Docker `config.json`
+  (a `kubernetes.io/dockerconfigjson` Secret works; Helm
+  `registryCredentials.existingSecret`). A login is sent only to the token
+  endpoint of the registry it is for (for Docker Hub, `auth.docker.io`), never
+  to wherever a challenge points, and never logged.
 
 `cargo test --test live -- --ignored --nocapture` checks the registry and GitLab
 code against the real services.

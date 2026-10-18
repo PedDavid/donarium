@@ -12,7 +12,8 @@ use donarium::fx::{Fx, FxClient, spawn_retry};
 use donarium::metrics::Metrics;
 use donarium::model::Provider;
 use donarium::scan::fetch::ArchiveFetcher;
-use donarium::scan::registry::RegistryClient;
+use donarium::scan::funding::FundingFinder;
+use donarium::scan::registry::{RegistryClient, parse_docker_config};
 use donarium::scan::run::{Scanner, spawn_scheduler};
 use donarium::store::Store;
 use donarium::web::auth::AuthMode;
@@ -65,12 +66,46 @@ async fn main() -> anyhow::Result<()> {
             std::time::Duration::from_secs(3600),
         );
     }
+    if !cfg.demo {
+        donarium::recurring::spawn(
+            store.clone(),
+            fx.clone(),
+            std::time::Duration::from_secs(3600),
+        );
+    }
     let demo_dev_auth = cfg.demo && cfg.auth.oidc_issuer.is_none();
     let auth = AuthMode::from_config(&cfg.auth, &cfg.public_url, demo_dev_auth)?;
     let cookie_key = load_cookie_key(&cfg)?;
 
     let ops = web::ops_router(store.clone(), metrics, cfg.base_currency.clone());
-    let state = AppState::new(cfg.clone(), store, scanner, fx, auth, cookie_key);
+    let s3 = match (
+        &cfg.s3_endpoint,
+        &cfg.s3_bucket,
+        read_token(&cfg.s3_access_key_file)?,
+        read_token(&cfg.s3_secret_key_file)?,
+    ) {
+        (Some(endpoint), Some(bucket), Some(access_key), Some(secret_key)) => Some(
+            donarium::s3::S3::new(donarium::s3::S3Config {
+                endpoint: endpoint.clone(),
+                region: cfg.s3_region.clone(),
+                bucket: bucket.clone(),
+                access_key,
+                secret_key,
+                sse: cfg.s3_sse,
+            })
+            .context("building the S3 client")?,
+        ),
+        _ => None,
+    };
+    let mut state = AppState::new(cfg.clone(), store, scanner, fx, auth, cookie_key);
+    if let (Some(url), Some(token)) = (&cfg.paperless_url, read_token(&cfg.paperless_token_file)?) {
+        let paperless = donarium::receipts::Paperless::new(url.clone(), token)
+            .context("building the Paperless client")?;
+        state = state.with_paperless(paperless);
+    }
+    if let Some(s3) = s3 {
+        state = state.with_s3(s3);
+    }
     let app = web::router(state);
 
     let ui_listener = tokio::net::TcpListener::bind(cfg.listen).await?;
@@ -120,9 +155,27 @@ fn build_scanner(cfg: &Config, store: Arc<Store>) -> anyhow::Result<Scanner> {
             .context("building the GitHub client")?,
         ));
     }
-    let registry =
+    let mut registry =
         RegistryClient::new(cfg.registry_allow.clone()).context("building the registry client")?;
-    Ok(Scanner::new(store, fetchers, registry))
+    if let Some(path) = &cfg.registry_credentials_file {
+        let json =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let credentials = parse_docker_config(&json)
+            .map_err(|why| anyhow::anyhow!("{}: {why}", path.display()))?;
+        info!(registries = credentials.len(), "registry logins loaded");
+        registry = registry.with_credentials(credentials);
+    }
+    let mut scanner = Scanner::new(store, fetchers, registry);
+    if !cfg.demo {
+        scanner = scanner.with_funding_finder(
+            FundingFinder::new(
+                cfg.github_api_url.clone(),
+                read_token(&cfg.github_token_file)?,
+            )
+            .context("building the GitHub funding client")?,
+        );
+    }
+    Ok(scanner)
 }
 
 fn init_tracing(json: bool) {
