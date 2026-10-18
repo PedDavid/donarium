@@ -113,6 +113,12 @@
     <div>
       <h2 class="text-lg font-semibold tracking-tight">Ways to donate</h2>
       <p class="text-muted-foreground text-sm">Donate on the project's own page, then record the donation here.</p>
+      {% if layout.admin && can_discover %}
+      <form method="post" action="/projects/{{ project.name }}/funding/discover" class="mt-2">
+        <input type="hidden" name="_csrf" value="{{ layout.csrf }}">
+        <button type="submit" class="btn" data-variant="outline" data-size="sm" title="Reads the project's .github/FUNDING.yml on GitHub">Look for them on GitHub</button>
+      </form>
+      {% endif %}
     </div>
     {% if links.is_empty() %}
     <p class="text-sm text-muted-foreground">None known yet.{% if layout.admin %} Add one below.{% endif %}</p>
@@ -125,7 +131,7 @@
         {% else %}
         <span>{{ l.platform_name }}: {{ l.handle }}</span>
         {% endif %}
-        {% if l.manual %}<span class="badge" data-variant="secondary">added by hand</span>{% endif %}
+        {% if l.manual %}<span class="badge" data-variant="secondary">added by hand</span>{% else %}<span class="badge" data-variant="outline" title="From the project's FUNDING.yml">found</span>{% endif %}
         {% if layout.admin && l.manual %}
         <form method="post" action="/projects/{{ project.name }}/funding/delete">
           <input type="hidden" name="_csrf" value="{{ layout.csrf }}">

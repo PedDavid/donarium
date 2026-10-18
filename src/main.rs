@@ -12,6 +12,7 @@ use donarium::fx::{Fx, FxClient, spawn_retry};
 use donarium::metrics::Metrics;
 use donarium::model::Provider;
 use donarium::scan::fetch::ArchiveFetcher;
+use donarium::scan::funding::FundingFinder;
 use donarium::scan::registry::RegistryClient;
 use donarium::scan::run::{Scanner, spawn_scheduler};
 use donarium::store::Store;
@@ -149,7 +150,17 @@ fn build_scanner(cfg: &Config, store: Arc<Store>) -> anyhow::Result<Scanner> {
     }
     let registry =
         RegistryClient::new(cfg.registry_allow.clone()).context("building the registry client")?;
-    Ok(Scanner::new(store, fetchers, registry))
+    let mut scanner = Scanner::new(store, fetchers, registry);
+    if !cfg.demo {
+        scanner = scanner.with_funding_finder(
+            FundingFinder::new(
+                cfg.github_api_url.clone(),
+                read_token(&cfg.github_token_file)?,
+            )
+            .context("building the GitHub funding client")?,
+        );
+    }
+    Ok(scanner)
 }
 
 fn init_tracing(json: bool) {
