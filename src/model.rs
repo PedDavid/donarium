@@ -273,6 +273,67 @@ impl DonationKind {
     }
 }
 
+/// How often a recurring donation is made.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Every {
+    #[default]
+    Monthly,
+    Yearly,
+}
+
+impl Every {
+    pub const ALL: [Every; 2] = [Every::Monthly, Every::Yearly];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Every::Monthly => "monthly",
+            Every::Yearly => "yearly",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Every::Monthly => "every month",
+            Every::Yearly => "every year",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Every> {
+        Every::ALL.into_iter().find(|e| e.as_str() == s)
+    }
+}
+
+/// A recurring donation to set up (already validated).
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewRecurring {
+    pub project: String,
+    pub platform: String,
+    pub amount_minor: i64,
+    pub currency: String,
+    pub every: Every,
+    pub starts_on: jiff::civil::Date,
+    pub note: String,
+}
+
+/// A monthly or yearly donation that records itself when it is due.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Recurring {
+    pub id: i64,
+    pub project: String,
+    pub project_repo: String,
+    pub platform: String,
+    pub amount_minor: i64,
+    pub currency: String,
+    pub every: Every,
+    pub starts_on: jiff::civil::Date,
+    /// The last day it can fall on; `None` while it keeps running.
+    pub ends_on: Option<jiff::civil::Date>,
+    pub note: String,
+    pub created_by: Actor,
+    /// Donations it has recorded so far.
+    pub recorded: i64,
+}
+
 /// Where a conversion rate came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FxSource {
@@ -361,4 +422,46 @@ pub struct Totals {
     pub by_currency: Vec<(String, i64)>,
     /// In the base currency, newest year first.
     pub by_year: Vec<(i32, i64)>,
+}
+
+/// A file that was uploaded to the bucket, about to be recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewUpload {
+    pub key: String,
+    pub filename: String,
+    pub content_type: String,
+    pub size: i64,
+    pub sha256: String,
+}
+
+/// Where a receipt lives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiptStore {
+    /// A document in Paperless-ngx, linked by id.
+    Paperless,
+    /// A file uploaded to the S3 bucket.
+    S3,
+}
+
+impl ReceiptStore {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReceiptStore::Paperless => "paperless",
+            ReceiptStore::S3 => "s3",
+        }
+    }
+}
+
+/// What a donation points to as its receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Receipt {
+    pub id: i64,
+    pub donation_id: i64,
+    pub store: ReceiptStore,
+    /// Paperless: the document's id. S3: the object's key.
+    pub reference: String,
+    /// The document's title, or the uploaded file's name.
+    pub title: String,
+    pub content_type: Option<String>,
+    pub linked_by: String,
 }

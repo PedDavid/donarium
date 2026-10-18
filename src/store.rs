@@ -13,9 +13,11 @@ use sqlx::{Row, SqlitePool};
 
 use crate::fx::Rate;
 use crate::model::{
-    Actor, Conversion, Donation, DonationKind, Funding, FxSource, NewDonation, NewSource, Origin,
-    Project, ProjectUpdate, Provider, ScanMethod, Source, SourceUpdate, TRANSITIVE_FACTOR, Totals,
+    Actor, Conversion, Donation, DonationKind, Every, Funding, FxSource, NewDonation, NewRecurring,
+    NewSource, NewUpload, Origin, Project, ProjectUpdate, Provider, Receipt, ReceiptStore,
+    Recurring, ScanMethod, Source, SourceUpdate, TRANSITIVE_FACTOR, Totals,
 };
+use crate::scan::funding::Found;
 use crate::scan::manifests::{ImageUse, Skipped};
 use crate::scan::resolve::slug;
 use crate::scan::usage::{Lookup, Resolved, resolve};
@@ -584,26 +586,32 @@ impl Store {
         now: Timestamp,
     ) -> Result<Donation, StoreError> {
         let mut tx = self.pool.begin().await?;
+        let id = insert_donation(&mut tx, new, by, now, None).await?;
+        tx.commit().await?;
+        self.get_donation(id).await?.ok_or(StoreError::NotFound)
+    }
+
+    /// Sets up a recurring donation. Nothing is recorded yet: see
+    /// [`crate::recurring::record_due`].
+    pub async fn create_recurring(
+        &self,
+        new: &NewRecurring,
+        by: &Actor,
+        now: Timestamp,
+    ) -> Result<i64, StoreError> {
+        let mut tx = self.pool.begin().await?;
         let project = project_id(&mut tx, &new.project).await?;
-        let (base, rate, source) = match &new.conversion {
-            Some(c) => (Some(c.base_minor), Some(c.rate), Some(c.source.as_str())),
-            None => (None, None, None),
-        };
-        let id: i64 = sqlx::query_scalar(
-            "INSERT INTO donation (project_id, platform, amount_minor, currency, donated_on,
-                                   base_amount_minor, fx_rate, fx_source, kind, note,
-                                   recorded_by, recorded_by_name, recorded_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        let id = sqlx::query_scalar(
+            "INSERT INTO recurring (project_id, platform, amount_minor, currency, every, starts_on,
+                                    note, created_by, created_by_name, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
         )
         .bind(project)
         .bind(&new.platform)
         .bind(new.amount_minor)
         .bind(&new.currency)
-        .bind(new.donated_on.to_string())
-        .bind(base)
-        .bind(rate)
-        .bind(source)
-        .bind(new.kind.as_str())
+        .bind(new.every.as_str())
+        .bind(new.starts_on.to_string())
         .bind(&new.note)
         .bind(&by.sub)
         .bind(&by.name)
@@ -611,7 +619,223 @@ impl Store {
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
-        self.get_donation(id).await?.ok_or(StoreError::NotFound)
+        Ok(id)
+    }
+
+    pub async fn list_recurring(&self) -> Result<Vec<Recurring>, StoreError> {
+        sqlx::query(
+            "SELECT r.*, p.name AS project_name, p.repo AS project_repo,
+                    (SELECT COUNT(*) FROM donation d WHERE d.recurring_id = r.id) AS recorded
+               FROM recurring r JOIN project p ON p.id = r.project_id
+              ORDER BY r.ends_on IS NOT NULL, r.id",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|row| {
+            let date = |col: &str| -> Result<jiff::civil::Date, StoreError> {
+                let raw: String = row.try_get(col)?;
+                raw.parse().map_err(|_| corrupt(col, &raw))
+            };
+            let every: String = row.try_get("every")?;
+            let ends: Option<String> = row.try_get("ends_on")?;
+            Ok(Recurring {
+                id: row.try_get("id")?,
+                project: row.try_get("project_name")?,
+                project_repo: row.try_get("project_repo")?,
+                platform: row.try_get("platform")?,
+                amount_minor: row.try_get("amount_minor")?,
+                currency: row.try_get("currency")?,
+                every: Every::parse(&every).ok_or_else(|| corrupt("interval", &every))?,
+                starts_on: date("starts_on")?,
+                ends_on: ends
+                    .map(|e| e.parse().map_err(|_| corrupt("ends_on", &e)))
+                    .transpose()?,
+                note: row.try_get("note")?,
+                created_by: Actor::new(
+                    row.try_get::<String, _>("created_by")?,
+                    row.try_get::<String, _>("created_by_name")?,
+                ),
+                recorded: row.try_get("recorded")?,
+            })
+        })
+        .collect()
+    }
+
+    /// Stops a plan after `last_day`: nothing falling later is recorded. What
+    /// was recorded stays.
+    pub async fn end_recurring(
+        &self,
+        id: i64,
+        last_day: jiff::civil::Date,
+    ) -> Result<(), StoreError> {
+        let done = sqlx::query("UPDATE recurring SET ends_on = ? WHERE id = ? AND ends_on IS NULL")
+            .bind(last_day.to_string())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        if done.rows_affected() == 0 {
+            let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM recurring WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+            return Err(match exists {
+                Some(_) => StoreError::InUse("that recurring donation has already ended".into()),
+                None => StoreError::NotFound,
+            });
+        }
+        Ok(())
+    }
+
+    /// The due dates a plan has already recorded a donation for.
+    pub async fn recorded_due_dates(&self, id: i64) -> Result<Vec<jiff::civil::Date>, StoreError> {
+        let raw: Vec<String> =
+            sqlx::query_scalar("SELECT recurring_due FROM donation WHERE recurring_id = ?")
+                .bind(id)
+                .fetch_all(&self.pool)
+                .await?;
+        raw.iter()
+            .map(|d| d.parse().map_err(|_| corrupt("recurring_due", d)))
+            .collect()
+    }
+
+    /// Records the donation a plan owes for `due`. `None` if that date was
+    /// already recorded (by another run).
+    pub async fn record_planned_donation(
+        &self,
+        plan: i64,
+        due: jiff::civil::Date,
+        new: &NewDonation,
+        by: &Actor,
+        now: Timestamp,
+    ) -> Result<Option<Donation>, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let id = match insert_donation(&mut tx, new, by, now, Some((plan, due))).await {
+            Ok(id) => id,
+            Err(StoreError::Db(e))
+                if e.as_database_error()
+                    .is_some_and(|d| d.is_unique_violation()) =>
+            {
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        };
+        tx.commit().await?;
+        Ok(Some(
+            self.get_donation(id).await?.ok_or(StoreError::NotFound)?,
+        ))
+    }
+
+    /// Points a donation at a Paperless document. Linking it twice is a no-op.
+    pub async fn link_receipt(
+        &self,
+        donation_id: i64,
+        reference: &str,
+        title: &str,
+        by: &Actor,
+        now: Timestamp,
+    ) -> Result<(), StoreError> {
+        let donation = self
+            .get_donation(donation_id)
+            .await?
+            .ok_or(StoreError::NotFound)?;
+        if donation.voided.is_some() {
+            return Err(StoreError::InUse(
+                "a voided donation cannot get a receipt".into(),
+            ));
+        }
+        sqlx::query(
+            "INSERT OR IGNORE INTO receipt (donation_id, store, reference, title, linked_by, linked_at)
+             VALUES (?, 'paperless', ?, ?, ?, ?)",
+        )
+        .bind(donation_id)
+        .bind(reference)
+        .bind(title)
+        .bind(&by.sub)
+        .bind(now.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Donations that count and have no receipt linked.
+    pub async fn donations_without_receipt(&self) -> Result<i64, StoreError> {
+        Ok(sqlx::query_scalar(
+            "SELECT COUNT(*) FROM donation d
+             WHERE d.voids_id IS NULL
+               AND NOT EXISTS (SELECT 1 FROM donation v WHERE v.voids_id = d.id)
+               AND NOT EXISTS (SELECT 1 FROM receipt r WHERE r.donation_id = d.id)",
+        )
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    pub async fn unlink_receipt(&self, id: i64) -> Result<(), StoreError> {
+        let done = sqlx::query("DELETE FROM receipt WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        if done.rows_affected() == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Records a file kept in the S3 bucket as a donation's receipt.
+    pub async fn add_upload(
+        &self,
+        donation_id: i64,
+        upload: &NewUpload,
+        by: &Actor,
+        now: Timestamp,
+    ) -> Result<(), StoreError> {
+        let donation = self
+            .get_donation(donation_id)
+            .await?
+            .ok_or(StoreError::NotFound)?;
+        if donation.voided.is_some() {
+            return Err(StoreError::InUse(
+                "a voided donation cannot get a receipt".into(),
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO receipt (donation_id, store, reference, title, content_type, size_bytes, sha256, linked_by, linked_at)
+             VALUES (?, 's3', ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(donation_id)
+        .bind(&upload.key)
+        .bind(&upload.filename)
+        .bind(&upload.content_type)
+        .bind(upload.size)
+        .bind(&upload.sha256)
+        .bind(&by.sub)
+        .bind(now.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    const RECEIPT_SELECT: &str =
+        "SELECT id, donation_id, store, reference, title, content_type, linked_by FROM receipt";
+
+    /// Every linked receipt, for showing next to the donations.
+    pub async fn list_receipts(&self) -> Result<Vec<Receipt>, StoreError> {
+        sqlx::query(&format!("{} ORDER BY id", Self::RECEIPT_SELECT))
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(receipt_from_row)
+            .collect()
+    }
+
+    pub async fn get_receipt(&self, id: i64) -> Result<Option<Receipt>, StoreError> {
+        sqlx::query(&format!("{} WHERE id = ?", Self::RECEIPT_SELECT))
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .map(receipt_from_row)
+            .transpose()
     }
 
     /// Cancels a donation with a void entry. The donation stays in the history,
@@ -843,6 +1067,46 @@ impl Store {
         Ok(())
     }
 
+    /// Which sources use a project, and how much each contributes to its score
+    /// (a disabled source contributes nothing).
+    pub async fn usage_breakdown(&self, name: &str) -> Result<Vec<UsageEntry>, StoreError> {
+        sqlx::query(
+            "SELECT s.id AS source_id, s.provider, s.repo, s.enabled, s.weight, u.via, u.kind
+               FROM usage u
+               JOIN source s ON s.id = u.source_id
+               JOIN project p ON p.id = u.project_id
+              WHERE p.name = ?
+              ORDER BY s.repo COLLATE NOCASE, u.via",
+        )
+        .bind(name)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|r| {
+            let provider: String = r.try_get("provider")?;
+            let kind: String = r.try_get("kind")?;
+            let enabled: bool = r.try_get("enabled")?;
+            let weight: f64 = r.try_get("weight")?;
+            let factor = if kind == "direct" {
+                1.0
+            } else {
+                TRANSITIVE_FACTOR
+            };
+            Ok(UsageEntry {
+                source_id: r.try_get("source_id")?,
+                provider: Provider::parse(&provider)
+                    .ok_or_else(|| corrupt("provider", &provider))?,
+                repo: r.try_get("repo")?,
+                enabled,
+                weight,
+                via: r.try_get("via")?,
+                direct: kind == "direct",
+                contribution: if enabled { weight * factor } else { 0.0 },
+            })
+        })
+        .collect()
+    }
+
     // --- projects ---
 
     /// All projects, ordered by name. The usage score is what enabled sources
@@ -1056,6 +1320,65 @@ impl Store {
         Ok(())
     }
 
+    /// Replaces what was discovered for a project's funding with `found`,
+    /// leaving what an admin added alone, and notes that it was checked.
+    pub async fn set_discovered_funding(
+        &self,
+        name: &str,
+        found: &[Found],
+        now: Timestamp,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let id = project_id(&mut tx, name).await?;
+        sqlx::query("DELETE FROM project_funding WHERE project_id = ? AND origin = 'discovered'")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        for f in found {
+            // A manual entry for the same handle wins.
+            sqlx::query(
+                "INSERT OR IGNORE INTO project_funding (project_id, platform, handle, url, origin)
+                 VALUES (?, ?, ?, ?, 'discovered')",
+            )
+            .bind(id)
+            .bind(&f.platform)
+            .bind(&f.handle)
+            .bind(&f.url)
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query("UPDATE project SET funding_checked_at = ? WHERE id = ?")
+            .bind(now.to_string())
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// GitHub projects whose funding was never looked up, or not since
+    /// `before`, oldest check first: `(name, repo)`.
+    pub async fn projects_to_check_for_funding(
+        &self,
+        before: Timestamp,
+        limit: i64,
+    ) -> Result<Vec<(String, String)>, StoreError> {
+        sqlx::query(
+            "SELECT name, repo FROM project
+              WHERE repo LIKE 'github.com/%'
+                AND (funding_checked_at IS NULL OR funding_checked_at < ?)
+              ORDER BY funding_checked_at IS NOT NULL, funding_checked_at, name
+              LIMIT ?",
+        )
+        .bind(before.to_string())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|r| Ok((r.try_get("name")?, r.try_get("repo")?)))
+        .collect()
+    }
+
     /// Removes a way to donate that was added by hand.
     pub async fn remove_funding(
         &self,
@@ -1080,6 +1403,45 @@ impl Store {
         tx.commit().await?;
         Ok(())
     }
+}
+
+/// Inserts a donation row, from a plan's due date when `plan` is given.
+async fn insert_donation(
+    tx: &mut sqlx::SqliteConnection,
+    new: &NewDonation,
+    by: &Actor,
+    now: Timestamp,
+    plan: Option<(i64, jiff::civil::Date)>,
+) -> Result<i64, StoreError> {
+    let project = project_id(tx, &new.project).await?;
+    let (base, rate, source) = match &new.conversion {
+        Some(c) => (Some(c.base_minor), Some(c.rate), Some(c.source.as_str())),
+        None => (None, None, None),
+    };
+    Ok(sqlx::query_scalar(
+        "INSERT INTO donation (project_id, platform, amount_minor, currency, donated_on,
+                               base_amount_minor, fx_rate, fx_source, kind, note,
+                               recorded_by, recorded_by_name, recorded_at,
+                               recurring_id, recurring_due)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+    )
+    .bind(project)
+    .bind(&new.platform)
+    .bind(new.amount_minor)
+    .bind(&new.currency)
+    .bind(new.donated_on.to_string())
+    .bind(base)
+    .bind(rate)
+    .bind(source)
+    .bind(new.kind.as_str())
+    .bind(&new.note)
+    .bind(&by.sub)
+    .bind(&by.name)
+    .bind(now.to_string())
+    .bind(plan.map(|(id, _)| id))
+    .bind(plan.map(|(_, due)| due.to_string()))
+    .fetch_one(&mut *tx)
+    .await?)
 }
 
 async fn project_id(tx: &mut sqlx::SqliteConnection, name: &str) -> Result<i64, StoreError> {
@@ -1166,6 +1528,21 @@ async fn upsert_project(
     .await?)
 }
 
+/// One source's use of a project.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UsageEntry {
+    pub source_id: i64,
+    pub provider: Provider,
+    pub repo: String,
+    pub enabled: bool,
+    pub weight: f64,
+    /// Which scan found it: `images` or `dependencies`.
+    pub via: String,
+    pub direct: bool,
+    /// What it adds to the project's usage score.
+    pub contribution: f64,
+}
+
 /// A donation waiting for its amount in the base currency.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingConversion {
@@ -1239,6 +1616,27 @@ fn corrupt(what: &str, value: &str) -> StoreError {
 fn timestamp(row: &SqliteRow, column: &str) -> Result<Timestamp, StoreError> {
     let raw: String = row.try_get(column)?;
     raw.parse().map_err(|_| corrupt(column, &raw))
+}
+
+fn receipt_from_row(row: &SqliteRow) -> Result<Receipt, StoreError> {
+    let store: String = row.try_get("store")?;
+    Ok(Receipt {
+        id: row.try_get("id")?,
+        donation_id: row.try_get("donation_id")?,
+        store: match store.as_str() {
+            "paperless" => ReceiptStore::Paperless,
+            "s3" => ReceiptStore::S3,
+            other => {
+                return Err(StoreError::Corrupt(format!(
+                    "unknown receipt store {other:?}"
+                )));
+            }
+        },
+        reference: row.try_get("reference")?,
+        title: row.try_get("title")?,
+        content_type: row.try_get("content_type")?,
+        linked_by: row.try_get("linked_by")?,
+    })
 }
 
 fn donation_from_row(row: &SqliteRow) -> Result<Donation, StoreError> {
@@ -1508,6 +1906,70 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(left, 0);
+    }
+
+    #[tokio::test]
+    async fn usage_breakdown_lists_each_source_with_its_contribution() {
+        let store = Store::memory().await.unwrap();
+        let heavy = store
+            .create_source(&new_source("me/heavy"), &actor(), now())
+            .await
+            .unwrap();
+        let mut light = new_source("me/light");
+        light.weight = 0.4;
+        let light = store.create_source(&light, &actor(), now()).await.unwrap();
+        sqlx::query("INSERT INTO project (id, name, repo, first_seen_at, last_seen_at) VALUES (1, 'a-b', 'github.com/a/b', 'x', 'x')")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        for (source, via, kind) in [
+            (heavy.id, "images", "direct"),
+            (heavy.id, "dependencies", "transitive"),
+            (light.id, "dependencies", "transitive"),
+        ] {
+            sqlx::query("INSERT INTO usage (source_id, project_id, via, kind) VALUES (?, 1, ?, ?)")
+                .bind(source)
+                .bind(via)
+                .bind(kind)
+                .execute(store.pool())
+                .await
+                .unwrap();
+        }
+        let usage = store.usage_breakdown("a-b").await.unwrap();
+        assert_eq!(usage.len(), 3);
+        assert_eq!(usage[0].repo, "me/heavy");
+        assert!(
+            usage
+                .iter()
+                .any(|u| u.via == "images" && u.direct && u.contribution == 1.0)
+        );
+        assert!(
+            usage
+                .iter()
+                .any(|u| u.repo == "me/light" && !u.direct && (u.contribution - 0.1).abs() < 1e-9)
+        );
+        // A disabled source contributes nothing, but is still listed.
+        store
+            .update_source(
+                light.id,
+                &SourceUpdate {
+                    weight: 0.4,
+                    scan_method: ScanMethod::Auto,
+                    enabled: false,
+                },
+                &actor(),
+                now(),
+            )
+            .await
+            .unwrap();
+        let usage = store.usage_breakdown("a-b").await.unwrap();
+        assert!(
+            usage
+                .iter()
+                .filter(|u| u.repo == "me/light")
+                .all(|u| !u.enabled && u.contribution == 0.0)
+        );
+        assert!(store.usage_breakdown("nope").await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1915,6 +2377,203 @@ mod tests {
             .execute(store.pool())
             .await;
         assert!(other.is_err());
+    }
+
+    #[tokio::test]
+    async fn receipts_are_links_that_can_be_removed() {
+        let store = store_with_project().await;
+        let d = store
+            .record_donation(
+                &donation("tokio-rs-tokio", 1000, "EUR", date(2026, 3, 1), Some(1000)),
+                &actor(),
+                now(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.donations_without_receipt().await.unwrap(), 1);
+        store
+            .link_receipt(d.id, "42", "Receipt", &actor(), now())
+            .await
+            .unwrap();
+        // The same document twice is one link.
+        store
+            .link_receipt(d.id, "42", "Receipt", &actor(), now())
+            .await
+            .unwrap();
+        let all = store.list_receipts().await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(
+            (all[0].donation_id, all[0].title.as_str()),
+            (d.id, "Receipt")
+        );
+        assert_eq!(store.donations_without_receipt().await.unwrap(), 0);
+
+        // The donation itself stays untouched, and unlinking brings it back.
+        store.unlink_receipt(all[0].id).await.unwrap();
+        assert!(matches!(
+            store.unlink_receipt(all[0].id).await,
+            Err(StoreError::NotFound)
+        ));
+        assert_eq!(store.donations_without_receipt().await.unwrap(), 1);
+
+        // A voided donation takes no receipt, and does not count as missing one.
+        store.void_donation(d.id, &actor(), now()).await.unwrap();
+        assert!(matches!(
+            store.link_receipt(d.id, "43", "", &actor(), now()).await,
+            Err(StoreError::InUse(_))
+        ));
+        assert_eq!(store.donations_without_receipt().await.unwrap(), 0);
+        assert!(matches!(
+            store.link_receipt(9999, "1", "", &actor(), now()).await,
+            Err(StoreError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn uploaded_files_are_receipts_too() {
+        let store = store_with_project().await;
+        let d = store
+            .record_donation(
+                &donation("tokio-rs-tokio", 1000, "EUR", date(2026, 3, 1), Some(1000)),
+                &actor(),
+                now(),
+            )
+            .await
+            .unwrap();
+        store
+            .link_receipt(d.id, "42", "From Paperless", &actor(), now())
+            .await
+            .unwrap();
+        let upload = NewUpload {
+            key: "receipts/2026/1/abc-r.pdf".into(),
+            filename: "r.pdf".into(),
+            content_type: "application/pdf".into(),
+            size: 12,
+            sha256: "abc".into(),
+        };
+        store
+            .add_upload(d.id, &upload, &actor(), now())
+            .await
+            .unwrap();
+        // The same object cannot be recorded twice.
+        assert!(
+            store
+                .add_upload(d.id, &upload, &actor(), now())
+                .await
+                .is_err()
+        );
+        let all = store.list_receipts().await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].store, ReceiptStore::Paperless);
+        let file = store.get_receipt(all[1].id).await.unwrap().unwrap();
+        assert_eq!(file.store, ReceiptStore::S3);
+        assert_eq!(file.reference, "receipts/2026/1/abc-r.pdf");
+        assert_eq!(file.content_type.as_deref(), Some("application/pdf"));
+        assert!(store.get_receipt(999).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn discovered_funding_replaces_only_what_was_discovered() {
+        let store = store_with_project().await;
+        let found = |platform: &str, handle: &str| Found {
+            platform: platform.into(),
+            handle: handle.into(),
+            url: None,
+        };
+        let before = store
+            .get_project("tokio-rs-tokio")
+            .await
+            .unwrap()
+            .unwrap()
+            .funding
+            .len();
+        store
+            .add_funding("tokio-rs-tokio", "liberapay", "mine", None)
+            .await
+            .unwrap();
+        store
+            .set_discovered_funding(
+                "tokio-rs-tokio",
+                &[found("opencollective", "tokio"), found("liberapay", "mine")],
+                now(),
+            )
+            .await
+            .unwrap();
+        let funding = store
+            .get_project("tokio-rs-tokio")
+            .await
+            .unwrap()
+            .unwrap()
+            .funding;
+        assert_eq!(funding.len(), before + 2);
+        // The hand-added entry stays manual even though it was also found.
+        assert!(funding.iter().find(|f| f.handle == "mine").unwrap().manual);
+        assert!(!funding.iter().find(|f| f.handle == "tokio").unwrap().manual);
+
+        // Looking again replaces what was found, and keeps what was added.
+        store
+            .set_discovered_funding("tokio-rs-tokio", &[found("kofi", "tokio")], now())
+            .await
+            .unwrap();
+        let funding = store
+            .get_project("tokio-rs-tokio")
+            .await
+            .unwrap()
+            .unwrap()
+            .funding;
+        assert!(
+            funding
+                .iter()
+                .all(|f| f.handle != "tokio" || f.platform == "kofi")
+        );
+        assert!(funding.iter().any(|f| f.handle == "mine" && f.manual));
+        assert!(matches!(
+            store.set_discovered_funding("nope", &[], now()).await,
+            Err(StoreError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn projects_are_checked_for_funding_when_never_or_long_ago() {
+        let store = store_with_project().await;
+        let long_ago: Timestamp = "2026-01-01T00:00:00Z".parse().unwrap();
+        let cutoff: Timestamp = "2026-06-01T00:00:00Z".parse().unwrap();
+        let due = store
+            .projects_to_check_for_funding(cutoff, 10)
+            .await
+            .unwrap();
+        assert!(
+            due.iter()
+                .any(|(n, r)| n == "tokio-rs-tokio" && r == "github.com/tokio-rs/tokio")
+        );
+        assert!(due.iter().all(|(_, r)| r.starts_with("github.com/")));
+        store
+            .set_discovered_funding("tokio-rs-tokio", &[], now())
+            .await
+            .unwrap();
+        // now() is after the cutoff, so it is not due again.
+        let due = store
+            .projects_to_check_for_funding(cutoff, 10)
+            .await
+            .unwrap();
+        assert!(due.iter().all(|(n, _)| n != "tokio-rs-tokio"));
+        // A check from long ago is due again.
+        store
+            .set_discovered_funding("tokio-rs-tokio", &[], long_ago)
+            .await
+            .unwrap();
+        let due = store
+            .projects_to_check_for_funding(cutoff, 10)
+            .await
+            .unwrap();
+        assert!(due.iter().any(|(n, _)| n == "tokio-rs-tokio"));
+        assert!(
+            store
+                .projects_to_check_for_funding(cutoff, 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

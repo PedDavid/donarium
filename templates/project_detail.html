@@ -42,6 +42,62 @@
     </section>
   </div>
 
+  {% if let Some(s) = standing %}
+  <div class="card w-full sm:max-w-xl">
+    <header>
+      <h2>Ranking</h2>
+      <p>{% if !s.position.is_empty() %}Number {{ s.position }} of {{ s.of }} projects you can donate to.{% else %}Not in the list: it has no way to donate yet.{% endif %}</p>
+    </header>
+    <section class="flex flex-col gap-4">
+      <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 text-sm">
+        <dt class="text-muted-foreground">Usage share</dt>
+        <dd>{{ s.share }} of everything in the ranking</dd>
+        <dt class="text-muted-foreground">Staleness</dt>
+        <dd>{{ s.staleness }} <span class="text-muted-foreground">({{ s.days }})</span></dd>
+        <dt class="text-muted-foreground">Priority</dt>
+        <dd>{{ s.priority }} <span class="text-muted-foreground">(share × staleness)</span></dd>
+      </dl>
+      {% if s.has_fair_share %}
+      <div class="flex flex-col gap-1">
+        <div class="flex justify-between text-sm">
+          <span>Donated {{ s.donated }}</span>
+          <span class="text-muted-foreground">fair share {{ s.fair_share }}</span>
+        </div>
+        <progress class="h-2 w-full accent-primary" value="{{ s.progress }}" max="100" aria-label="Donated, as a part of this project's fair share"></progress>
+        <p class="text-xs text-muted-foreground">{% if s.over %}{{ s.shortfall }} above its fair share: what you have donated in all, split by usage.{% else %}{{ s.shortfall }} short of its fair share: what you have donated in all, split by usage.{% endif %}</p>
+      </div>
+      {% endif %}
+    </section>
+  </div>
+  {% endif %}
+
+  {% if !usage.is_empty() %}
+  <div class="flex flex-col gap-3">
+    <div>
+      <h2 class="text-lg font-semibold tracking-tight">Used by</h2>
+      <p class="text-muted-foreground text-sm">The sources that use it, and what each adds to its usage score. A direct use counts in full, a transitive one a quarter.</p>
+    </div>
+    <div class="table-container rounded-lg border">
+      <table class="table">
+        <thead>
+          <tr><th>Source</th><th>Found by</th><th>Use</th><th>Weight</th><th>Adds</th></tr>
+        </thead>
+        <tbody>
+          {% for u in usage %}
+          <tr{% if !u.enabled %} class="text-muted-foreground"{% endif %}>
+            <td><a href="/sources/{{ u.source_id }}" class="font-medium hover:underline">{{ u.repo }}</a><div class="text-xs text-muted-foreground">{{ u.provider }}{% if !u.enabled %} · disabled{% endif %}</div></td>
+            <td>{{ u.how }}</td>
+            <td>{{ u.kind }}</td>
+            <td>{{ u.weight }}</td>
+            <td>{{ u.contribution }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+
   <div class="flex flex-col gap-3">
     <div class="flex flex-wrap items-end justify-between gap-2">
       <div>
@@ -57,6 +113,12 @@
     <div>
       <h2 class="text-lg font-semibold tracking-tight">Ways to donate</h2>
       <p class="text-muted-foreground text-sm">Donate on the project's own page, then record the donation here.</p>
+      {% if layout.admin && can_discover %}
+      <form method="post" action="/projects/{{ project.name }}/funding/discover" class="mt-2">
+        <input type="hidden" name="_csrf" value="{{ layout.csrf }}">
+        <button type="submit" class="btn" data-variant="outline" data-size="sm" title="Reads the project's .github/FUNDING.yml on GitHub">Look for them on GitHub</button>
+      </form>
+      {% endif %}
     </div>
     {% if links.is_empty() %}
     <p class="text-sm text-muted-foreground">None known yet.{% if layout.admin %} Add one below.{% endif %}</p>
@@ -69,7 +131,7 @@
         {% else %}
         <span>{{ l.platform_name }}: {{ l.handle }}</span>
         {% endif %}
-        {% if l.manual %}<span class="badge" data-variant="secondary">added by hand</span>{% endif %}
+        {% if l.manual %}<span class="badge" data-variant="secondary">added by hand</span>{% else %}<span class="badge" data-variant="outline" title="From the project's FUNDING.yml">found</span>{% endif %}
         {% if layout.admin && l.manual %}
         <form method="post" action="/projects/{{ project.name }}/funding/delete">
           <input type="hidden" name="_csrf" value="{{ layout.csrf }}">
