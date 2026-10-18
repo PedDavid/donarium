@@ -55,6 +55,10 @@ spec:
               value: /etc/donarium/gitea/{{ .Values.gitea.tokenSecret.key }}
             {{- end }}
             {{- end }}
+            {{- if .Values.registryCredentials.existingSecret }}
+            - name: DONARIUM_REGISTRY_CREDENTIALS_FILE
+              value: /etc/donarium/registry/{{ .Values.registryCredentials.key }}
+            {{- end }}
             {{- if .Values.github.tokenSecret.existingSecret }}
             - name: DONARIUM_GITHUB_TOKEN_FILE
               value: /etc/donarium/github/{{ .Values.github.tokenSecret.key }}
@@ -132,6 +136,11 @@ spec:
               mountPath: /etc/donarium/gitlab
               readOnly: true
             {{- end }}
+            {{- if .Values.registryCredentials.existingSecret }}
+            - name: registry-credentials
+              mountPath: /etc/donarium/registry
+              readOnly: true
+            {{- end }}
             {{- if and .Values.gitea.url .Values.gitea.tokenSecret.existingSecret }}
             - name: gitea-token
               mountPath: /etc/donarium/gitea
@@ -162,6 +171,11 @@ spec:
         - name: gitlab-token
           secret:
             secretName: {{ .Values.gitlab.tokenSecret.existingSecret }}
+        {{- end }}
+        {{- if .Values.registryCredentials.existingSecret }}
+        - name: registry-credentials
+          secret:
+            secretName: {{ .Values.registryCredentials.existingSecret }}
         {{- end }}
         {{- if and .Values.gitea.url .Values.gitea.tokenSecret.existingSecret }}
         - name: gitea-token

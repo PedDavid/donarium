@@ -107,6 +107,12 @@ pub struct Config {
     #[arg(long, env = "DONARIUM_REGISTRY_ALLOW", value_delimiter = ',')]
     pub registry_allow: Vec<String>,
 
+    /// A Docker config.json (or a Kubernetes dockerconfigjson Secret) with
+    /// logins for registries, e.g. Docker Hub, which limits anonymous lookups.
+    /// A login is only sent to its own registry's token endpoint.
+    #[arg(long, env = "DONARIUM_REGISTRY_CREDENTIALS_FILE")]
+    pub registry_credentials_file: Option<PathBuf>,
+
     #[command(flatten)]
     pub auth: AuthConfig,
 

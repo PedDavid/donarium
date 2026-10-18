@@ -12,7 +12,7 @@ use donarium::fx::{Fx, FxClient, spawn_retry};
 use donarium::metrics::Metrics;
 use donarium::model::Provider;
 use donarium::scan::fetch::ArchiveFetcher;
-use donarium::scan::registry::RegistryClient;
+use donarium::scan::registry::{RegistryClient, parse_docker_config};
 use donarium::scan::run::{Scanner, spawn_scheduler};
 use donarium::store::Store;
 use donarium::web::auth::AuthMode;
@@ -120,8 +120,16 @@ fn build_scanner(cfg: &Config, store: Arc<Store>) -> anyhow::Result<Scanner> {
             .context("building the GitHub client")?,
         ));
     }
-    let registry =
+    let mut registry =
         RegistryClient::new(cfg.registry_allow.clone()).context("building the registry client")?;
+    if let Some(path) = &cfg.registry_credentials_file {
+        let json =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let credentials = parse_docker_config(&json)
+            .map_err(|why| anyhow::anyhow!("{}: {why}", path.display()))?;
+        info!(registries = credentials.len(), "registry logins loaded");
+        registry = registry.with_credentials(credentials);
+    }
     Ok(Scanner::new(store, fetchers, registry))
 }
 
