@@ -59,6 +59,11 @@ donation keeps what was paid, exactly, in the currency it was paid in.
     truth; it is not tax advice.
 - `--step-up-max-age` makes recording and voiding require a recent login.
 
+Every donation that counts can be downloaded as a CSV file
+(`/donations/export.csv`, or `?year=2026` for a tax year) with the amount as
+paid, the amount in the base currency, the rate used and where it came from.
+Voided donations are left out.
+
 ## Receipts
 
 With `--paperless-url` and `--paperless-token-file` (an API token), each
